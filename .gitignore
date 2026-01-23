@@ -32,3 +32,4 @@ Thumbs.db
 backend/.env
 backend/.env
 backend/.env.backup
+/workspaces/credit-decision-ai/.env
