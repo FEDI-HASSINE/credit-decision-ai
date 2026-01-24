@@ -21,19 +21,19 @@ export interface CreditRequestCreate {
   seniority_years: number;
   family_status: string;
   documents: string[];
-}
-
-export interface CreditRequest {
-  id: string;
-  status: "pending" | "in_review" | "approved" | "rejected";
-  created_at: string;
-  updated_at: string;
-  client_id: string;
-  summary?: string;
-  customer_explanation?: string;
-  agents?: AgentBundle;
-  decision?: DecisionInfo;
-  comments?: Comment[];
+  other_income?: number;
+  marital_status?: string;
+  number_of_children?: number;
+  spouse_employed?: boolean;
+  housing_status?: string;
+  is_primary_holder?: boolean;
+  telemetry?: Record<string, unknown>;
+  documents_payloads?: Record<string, unknown>[];
+  document_texts?: Record<string, string>;
+  transaction_flags?: string[];
+  image_flags?: string[];
+  free_text?: string[];
+  declared_profile?: Record<string, unknown>;
 }
 
 export interface AgentResult {
@@ -55,15 +55,7 @@ export interface AgentBundle {
   fraud?: AgentResult;
   explanation?: AgentResult;
   behavior?: AgentResult;
-}
-
-export interface CommentCreate {
-  message: string;
-}
-
-export interface DecisionCreate {
-  decision: "approve" | "reject" | "review";
-  note?: string;
+  image?: AgentResult;
 }
 
 export interface DocumentInfo {
@@ -90,6 +82,19 @@ export interface DecisionInfo {
   decided_at?: string;
 }
 
+export interface CreditRequest {
+  id: string;
+  status: "pending" | "in_review" | "approved" | "rejected";
+  created_at: string;
+  updated_at: string;
+  client_id: string;
+  summary?: string;
+  customer_explanation?: string;
+  agents?: AgentBundle;
+  decision?: DecisionInfo;
+  comments?: Comment[];
+}
+
 export interface BankerRequest {
   id: string;
   status: "pending" | "in_review" | "approved" | "rejected";
@@ -114,4 +119,29 @@ export interface BankerRequest {
   agents?: AgentBundle;
   comments?: Comment[];
   decision?: DecisionInfo;
+}
+
+export interface AgentChatMessage {
+  role: "banker" | "agent";
+  content: string;
+  created_at: string;
+}
+
+export interface AgentChatRequest {
+  agent_name: string;
+  message: string;
+}
+
+export interface AgentChatResponse {
+  agent_name: string;
+  messages: AgentChatMessage[];
+}
+
+export interface CommentCreate {
+  message: string;
+}
+
+export interface DecisionCreate {
+  decision: "approve" | "reject" | "review";
+  note?: string;
 }

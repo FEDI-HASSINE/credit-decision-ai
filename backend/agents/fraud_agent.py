@@ -280,6 +280,10 @@ def node_finalize(state: FraudState) -> FraudState:
             "supporting_signals": supporting,
             "explanations": explanations,
         },
+        # Backward-compatible top-level fields
+        "fraud_flags": flags,
+        "fraud_score": round(score, 4),
+        "risk_level": level,
         "confidence": round(confidence, 4),
     }
     return {**state, "output": output}

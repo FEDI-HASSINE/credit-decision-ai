@@ -33,6 +33,9 @@ def _get_metric(telemetry: Dict[str, Any], key: str, default: float = 0.0) -> fl
 def _detect_flags(telemetry: Dict[str, Any]) -> List[str]:
     """Detect behavioral flags from telemetry (non-intrusive signals)."""
     flags: List[str] = []
+    if not telemetry:
+        flags.append("MISSING_TELEMETRY")
+        return flags
 
     submission_duration = _get_metric(telemetry, "submission_duration_seconds")
     number_of_edits = _get_metric(telemetry, "number_of_edits")
@@ -69,12 +72,15 @@ def _score_behavior(flags: List[str], telemetry: Dict[str, Any]) -> float:
     """Compute behavioral risk score (0-1) based on flags and telemetry intensity."""
     base = 0.15
     penalty_per_flag = 0.15
-    score = base + penalty_per_flag * len(flags)
+    effective_flags = [f for f in flags if f != "MISSING_TELEMETRY"]
+    score = base + penalty_per_flag * len(effective_flags)
 
     score += min(_get_metric(telemetry, "document_reuploads") * 0.02, 0.1)
     score += min(_get_metric(telemetry, "income_field_edits") * 0.02, 0.08)
 
-    jitter = (hash(str(telemetry)) % 5) / 1000.0  # up to 0.005, deterministic
+    import hashlib
+    jitter_seed = hashlib.md5(str(telemetry).encode("utf-8")).hexdigest()
+    jitter = (int(jitter_seed[:2], 16) % 5) / 1000.0  # up to 0.005, deterministic
     score += jitter
 
     return max(0.0, min(1.0, score))
@@ -104,7 +110,10 @@ def _compute_confidence(telemetry: Dict[str, Any], flags: List[str]) -> float:
     confidence = 0.6
     if telemetry:
         confidence += 0.1
-    confidence += min(0.05 * len(flags), 0.2)
+    else:
+        confidence -= 0.1
+    effective_flags = [f for f in flags if f != "MISSING_TELEMETRY"]
+    confidence += min(0.05 * len(effective_flags), 0.2)
     return max(0.0, min(1.0, confidence))
 
 
@@ -348,6 +357,12 @@ def analyze_behavior(request: Dict[str, Any]) -> Dict[str, Any]:
     brs_score = _score_behavior(flags, telemetry)
     behavior_level = _level_from_score(brs_score)
     supporting_metrics = _build_supporting_metrics(telemetry)
+    explanations = _generate_behavior_explanations({
+        "flags": flags,
+        "brs_score": brs_score,
+        "behavior_level": behavior_level,
+        "supporting_metrics": supporting_metrics,
+    })
     confidence = _compute_confidence(telemetry, flags)
 
     return {
@@ -357,8 +372,7 @@ def analyze_behavior(request: Dict[str, Any]) -> Dict[str, Any]:
             "behavior_level": behavior_level,
             "behavior_flags": flags,
             "supporting_metrics": supporting_metrics,
+            "explanations": explanations,
         },
         "confidence": round(confidence, 4),
     }
-
-

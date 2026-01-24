@@ -18,7 +18,7 @@ Tu es un agent qui aide les analystes crédit. Tu compares toujours le dossier a
 - docker-compose.yml : lance backend + Qdrant. Exemple attendu : `docker-compose up --build` expose l’API en 8000 et Qdrant en 6333.
 - .env : variables partagées (URL Qdrant, modèle d’embedding). Exemple attendu : le backend lit `QDRANT_URL` pour se connecter.
 - backend/ : API FastAPI + orchestrateur + agents.
-  - api/ : routes et schémas d’entrée. Exemple : POST /credit/decision accepte un corps JSON de demande de crédit.
+  - api/ : routes et schémas d’entrée. Exemple : POST /api/client/credit-requests accepte un corps JSON de demande de crédit.
   - core/ : orchestrateur qui appelle les agents et assemble la réponse.
   - agents/ : logique par rôle (stubs pour démarrer).
   - rag/ : briques de chunking/embedding/retrieval (à connecter à Qdrant).
@@ -41,7 +41,7 @@ Tu es un agent qui aide les analystes crédit. Tu compares toujours le dossier a
   - Exemple : {"credit_eligibility":"approved","recommended_amount":15000,"confidence":"high","main_reasons":["revenus stables","documents crédibles","profil similaire à clients solvables"]}
 
 ## Exemple de requête et de réponse attendue
-Requête POST /credit/decision :
+Requête POST /api/client/credit-requests :
 ```
 {
   "case_id": "CASE_001",
@@ -53,8 +53,16 @@ Requête POST /credit/decision :
 Réponse stub actuelle (pour démarrer) :
 ```
 {
-  "decision": "approve",
-  "explanation": "Decision=approve, fraud_ratio=0.2"
+  "id": "REQ_001",
+  "status": "in_review",
+  "summary": "Decision proposee: review | Raisons: aucun signal majeur",
+  "agents": { ... },
+  "decision": {
+    "decision": "review",
+    "reason_codes": ["DOC_INCONSISTENCY"],
+    "decision_confidence": 0.42,
+    "human_review_required": true
+  }
 }
 ```
 Réponse cible (quand les agents seront branchés) :

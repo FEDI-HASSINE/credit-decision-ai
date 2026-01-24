@@ -19,7 +19,7 @@ export const LoginPage = () => {
     setError(null);
     try {
       const payload: LoginRequest = { email, password };
-      const res = await http.post<LoginResponse>('/auth/login', payload, { auth: false });
+      const res = await http.post<LoginResponse>("/auth/login", payload, { auth: false });
       setAuth({ token: res.token, role: res.role, userId: res.user_id });
       if (res.role === "banker") navigate("/banker/requests", { replace: true });
       else navigate("/client/requests", { replace: true, state: location.state });
@@ -36,8 +36,9 @@ export const LoginPage = () => {
       <p style={{ color: "#475569" }}>Identifiez-vous pour accéder à votre espace.</p>
       <form className="grid" style={{ gap: 12 }} onSubmit={onSubmit}>
         <div className="form-group">
-          <label>Email</label>
+          <label htmlFor="login-email">Email</label>
           <input
+            id="login-email"
             className="input"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
@@ -46,8 +47,9 @@ export const LoginPage = () => {
           />
         </div>
         <div className="form-group">
-          <label>Mot de passe</label>
+          <label htmlFor="login-password">Mot de passe</label>
           <input
+            id="login-password"
             className="input"
             type="password"
             value={password}

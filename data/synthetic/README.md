@@ -12,4 +12,4 @@ Cas synthétiques pour démarrer sans données sensibles.
   "documents": ["invoice_001.pdf"]
 }
 ```
-- Résultat attendu: l’API renvoie une décision stub et une explication.
+- Résultat attendu: l’API renvoie une décision stub et une explication via `/api/client/credit-requests`.

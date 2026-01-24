@@ -125,6 +125,12 @@ if _lc_tool:
     def extract_peer_patterns_tool(sim_result: Dict[str, Any]) -> List[str]:
         """Extract dominant peer patterns from similarity agent result."""
         patterns = sim_result.get("dominant_patterns") or sim_result.get("patterns") or []
+        if not patterns and isinstance(sim_result, dict):
+            ai_analysis = sim_result.get("ai_analysis", {}) or {}
+            patterns = ai_analysis.get("red_flags") or []
+            recommendation = ai_analysis.get("recommendation")
+            if recommendation:
+                patterns = _safe_list(patterns) + [f"RECOMMENDATION:{recommendation}"]
         return _safe_list(patterns)
 
     @_lc_tool
@@ -176,6 +182,12 @@ def node_collect_signals(state: ExplanationState) -> ExplanationState:
         signals.extend(_safe_list(doc_flags))
 
     peer_patterns = sim_result.get("dominant_patterns") or sim_result.get("patterns")
+    if not peer_patterns:
+        ai_analysis = sim_result.get("ai_analysis", {}) or {}
+        peer_patterns = ai_analysis.get("red_flags") or []
+        recommendation = ai_analysis.get("recommendation")
+        if recommendation:
+            peer_patterns = _safe_list(peer_patterns) + [f"RECOMMENDATION:{recommendation}"]
     if peer_patterns:
         signals.extend(_safe_list(peer_patterns))
 
@@ -184,10 +196,15 @@ def node_collect_signals(state: ExplanationState) -> ExplanationState:
         signals.extend(_safe_list(b_flags))
 
     f_flags = fraud_result.get("fraud_flags")
+    if not f_flags:
+        f_flags = fraud_result.get("fraud_analysis", {}).get("detected_flags")
     if f_flags:
         signals.extend(_safe_list(f_flags))
 
     i_flags = image_result.get("tamper_flags") or image_result.get("flags")
+    if not i_flags:
+        image_analysis = image_result.get("image_analysis", {}) or {}
+        i_flags = image_analysis.get("tamper_flags") or image_analysis.get("flags")
     if i_flags:
         signals.extend(_safe_list(i_flags))
 
@@ -348,5 +365,3 @@ def explain_decision(
     state = node_generate_customer_summary(state)
     state = node_finalize(state)
     return state.get("output", {})
-
-

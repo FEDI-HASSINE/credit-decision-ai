@@ -5,7 +5,8 @@ Refactorisé avec LangChain & LangGraph
 
 import os
 import json
-from typing import Dict, Any, List, Optional, TypedDict
+from pathlib import Path
+from typing import Dict, Any, List, Optional, TypedDict, Tuple
 from dataclasses import dataclass, asdict
 
 # LangChain / LangGraph Imports
@@ -27,8 +28,13 @@ QDRANT_URL = os.getenv("QDRANT_URL")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 
 COLLECTION_NAME = "credit_dataset"
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"
-TOP_K_SIMILAR = 20
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+try:
+    TOP_K_SIMILAR = int(os.getenv("TOP_K_SIMILAR", "20"))
+except ValueError:
+    TOP_K_SIMILAR = 20
+SIMILARITY_DATASET_PATH = os.getenv("SIMILARITY_DATASET_PATH", "")
+QDRANT_AUTO_LOAD = os.getenv("QDRANT_AUTO_LOAD", "0") == "1"
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1")
@@ -146,16 +152,25 @@ class SimilarityAgentAI:
         print("=" * 60)
         
         # 1. Init Vector DB Client (Qdrant)
-        if not QDRANT_URL or not QDRANT_API_KEY:
-             print("ATTENTION: QDRANT_URL ou QDRANT_API_KEY manquant dans les variables d'environnement")
-        
-        self.qdrant_client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
-        print(f"Qdrant connecte: {str(QDRANT_URL)[:30]}...")
+        qdrant_url = QDRANT_URL or "http://localhost:6333"
+        qdrant_key = QDRANT_API_KEY or None
+        if not QDRANT_URL:
+             print("ATTENTION: QDRANT_URL manquant, utilisation du local http://localhost:6333")
+        try:
+            self.qdrant_client = QdrantClient(url=qdrant_url, api_key=qdrant_key)
+            print(f"Qdrant connecte: {str(qdrant_url)[:30]}...")
+        except Exception as exc:
+            print("Erreur initialisation Qdrant: " + str(exc))
+            self.qdrant_client = None
         
         # 2. Init Embeddings (LangChain HuggingFace Wrapper)
         # Remplace SentenceTransformer direct par LangChain wrapper
-        self.embedding_model = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
-        print("Modele d'embedding: " + EMBEDDING_MODEL)
+        try:
+            self.embedding_model = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+            print("Modele d'embedding: " + EMBEDDING_MODEL)
+        except Exception as exc:
+            print("Erreur chargement embedding: " + str(exc))
+            self.embedding_model = None
         
         # 3. Init LLM (LangChain ChatOpenAI)
         if OPENAI_API_KEY: 
@@ -175,6 +190,14 @@ class SimilarityAgentAI:
         
         self.collection_name = COLLECTION_NAME
         self.top_k = TOP_K_SIMILAR
+        self.dataset_path = self._find_dataset_path()
+        self._dataset_cache: Optional[List[Dict[str, Any]]] = None
+        self._dataset_stats: Optional[Dict[str, Tuple[float, float]]] = None
+
+        if self.qdrant_client:
+            self._ensure_collection()
+            if QDRANT_AUTO_LOAD:
+                self._load_dataset_into_qdrant_if_empty()
         
         # 4. Construire le Graph LangGraph
         self.graph = self._build_graph()
@@ -185,6 +208,171 @@ class SimilarityAgentAI:
     # --------------------------------------------------------------------------
     # LOGIQUE METIER (Helpers)
     # --------------------------------------------------------------------------
+
+    def _find_dataset_path(self) -> Optional[Path]:
+        candidates: List[Path] = []
+        if SIMILARITY_DATASET_PATH:
+            candidates.append(Path(SIMILARITY_DATASET_PATH))
+        try:
+            candidates.append(Path(__file__).resolve().parents[2] / "data" / "synthetic" / "credit_dataset.json")
+        except Exception:
+            pass
+        candidates.append(Path("/app/data/synthetic/credit_dataset.json"))
+        candidates.append(Path("/data/synthetic/credit_dataset.json"))
+        for path in candidates:
+            if path and path.exists():
+                return path
+        return None
+
+    def _get_dataset(self) -> List[Dict[str, Any]]:
+        if self._dataset_cache is not None:
+            return self._dataset_cache
+        if not self.dataset_path or not self.dataset_path.exists():
+            self._dataset_cache = []
+            return self._dataset_cache
+        try:
+            with open(self.dataset_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    self._dataset_cache = data
+                else:
+                    self._dataset_cache = []
+        except Exception:
+            self._dataset_cache = []
+        return self._dataset_cache
+
+    def _compute_dataset_stats(self, dataset: List[Dict[str, Any]]) -> Dict[str, Tuple[float, float]]:
+        if self._dataset_stats is not None:
+            return self._dataset_stats
+        numeric_fields = [
+            "loan_amount",
+            "loan_duration",
+            "monthly_income",
+            "other_income",
+            "monthly_charges",
+            "seniority_years",
+            "number_of_children",
+        ]
+        stats: Dict[str, Tuple[float, float]] = {}
+        for field in numeric_fields:
+            values = [float(rec.get(field, 0) or 0) for rec in dataset]
+            if not values:
+                stats[field] = (0.0, 1.0)
+                continue
+            stats[field] = (min(values), max(values))
+        self._dataset_stats = stats
+        return stats
+
+    def _numeric_distance(self, profile: Dict[str, Any], record: Dict[str, Any], stats: Dict[str, Tuple[float, float]]) -> float:
+        numeric_fields = [
+            "loan_amount",
+            "loan_duration",
+            "monthly_income",
+            "other_income",
+            "monthly_charges",
+            "seniority_years",
+            "number_of_children",
+        ]
+        distances: List[float] = []
+        for field in numeric_fields:
+            p_val = float(profile.get(field, 0) or 0)
+            r_val = float(record.get(field, 0) or 0)
+            min_v, max_v = stats.get(field, (0.0, 1.0))
+            denom = max(1e-6, max_v - min_v)
+            distances.append(abs(p_val - r_val) / denom)
+        return sum(distances) / max(1, len(distances))
+
+    def _categorical_bonus(self, profile: Dict[str, Any], record: Dict[str, Any]) -> float:
+        bonus = 0.0
+        for field, weight in [
+            ("employment_type", 0.05),
+            ("contract_type", 0.05),
+            ("marital_status", 0.03),
+            ("housing_status", 0.03),
+        ]:
+            if profile.get(field) and record.get(field) and str(profile.get(field)).lower() == str(record.get(field)).lower():
+                bonus += weight
+        return bonus
+
+    def _fallback_similar_cases(self, profile: Dict[str, Any]) -> List[Dict[str, Any]]:
+        dataset = self._get_dataset()
+        if not dataset:
+            return []
+        stats = self._compute_dataset_stats(dataset)
+        scored: List[Dict[str, Any]] = []
+        for record in dataset:
+            dist = self._numeric_distance(profile, record, stats)
+            score = max(0.0, 1.0 - dist)
+            score += self._categorical_bonus(profile, record)
+            score = max(0.0, min(1.0, score))
+            scored.append({
+                "case_id": record.get("case_id"),
+                "similarity_score": score,
+                "defaulted": record.get("defaulted", False),
+                "fraud_flag": record.get("fraud_flag", False),
+                "payload": record,
+            })
+        scored.sort(key=lambda x: x["similarity_score"], reverse=True)
+        return scored[: self.top_k]
+
+    def _ensure_collection(self) -> None:
+        if not self.qdrant_client:
+            return
+        try:
+            exists = self.qdrant_client.collection_exists(self.collection_name)
+        except Exception:
+            return
+        if exists:
+            return
+        vector_size = 384
+        if self.embedding_model:
+            try:
+                vector_size = len(self.embedding_model.embed_query("seed"))
+            except Exception:
+                vector_size = 384
+        try:
+            from qdrant_client.http.models import VectorParams, Distance
+
+            self.qdrant_client.create_collection(
+                collection_name=self.collection_name,
+                vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
+            )
+            print(f"Collection Qdrant creee: {self.collection_name}")
+        except Exception as exc:
+            print("Impossible de creer la collection Qdrant: " + str(exc))
+
+    def _load_dataset_into_qdrant_if_empty(self) -> None:
+        if not self.qdrant_client or not self.embedding_model:
+            return
+        dataset = self._get_dataset()
+        if not dataset:
+            return
+        try:
+            info = self.qdrant_client.get_collection(self.collection_name)
+            points_count = getattr(info, "points_count", None)
+            if points_count and points_count > 0:
+                return
+        except Exception:
+            pass
+        try:
+            from qdrant_client.http.models import PointStruct
+        except Exception:
+            return
+
+        batch = []
+        for record in dataset:
+            text = CreditProfile.from_dict(record).to_text()
+            try:
+                vector = self.embedding_model.embed_query(text)
+            except Exception:
+                continue
+            batch.append(PointStruct(id=record.get("case_id"), vector=vector, payload=record))
+            if len(batch) >= 100:
+                self.qdrant_client.upsert(collection_name=self.collection_name, points=batch)
+                batch = []
+        if batch:
+            self.qdrant_client.upsert(collection_name=self.collection_name, points=batch)
+        print("Dataset charge dans Qdrant (auto-load).")
     
     def _format_cases_for_llm(self, cases: List[Dict]) -> str:
         if not cases:
@@ -285,7 +473,10 @@ class SimilarityAgentAI:
             raise ValueError("Profil manquant pour la generation d'embedding")
 
         text_to_embed = profile.to_text()
-        
+        if not self.embedding_model:
+            print("   Embedding indisponible, fallback sans vecteur")
+            return {"query_vector": []}
+
         # Utilisation de LangChain Embeddings
         query_vector = self.embedding_model.embed_query(text_to_embed)
         
@@ -298,19 +489,37 @@ class SimilarityAgentAI:
         print("Etape 3/5: Recherche des " + str(self.top_k) + " cas similaires...")
         
         query_vector = state.get("query_vector", [])
+        profile_dict = state.get("profile_dict") or {}
         similar_cases: List[Dict[str, Any]] = []
-        
-        try:
-            results = self.qdrant_client.query_points(
-                collection_name=self.collection_name,
-                query=query_vector,
-                limit=self.top_k,
-                with_payload=True
-            )
-            points = results.points if hasattr(results, "points") else results
-        except Exception as e:
-            print("Erreur Qdrant: " + str(e))
+        if not self.qdrant_client or not query_vector:
+            print("   Qdrant ou embedding indisponible, aucun cas similaire recherche")
             points = []
+        else:
+            try:
+                results = self.qdrant_client.query_points(
+                    collection_name=self.collection_name,
+                    query=query_vector,
+                    limit=self.top_k,
+                    with_payload=True
+                )
+                points = results.points if hasattr(results, "points") else results
+            except Exception as e:
+                print("Erreur Qdrant: " + str(e))
+                if hasattr(self.qdrant_client, "search"):
+                    try:
+                        results = self.qdrant_client.search(
+                            collection_name=self.collection_name,
+                            query_vector=query_vector,
+                            limit=self.top_k,
+                            with_payload=True,
+                        )
+                        points = results if isinstance(results, list) else getattr(results, "points", [])
+                        print("   Fallback Qdrant: search() utilise")
+                    except Exception as search_exc:
+                        print("Erreur Qdrant search: " + str(search_exc))
+                        points = []
+                else:
+                    points = []
         
         for result in points:
             if hasattr(result, "payload"):
@@ -331,7 +540,15 @@ class SimilarityAgentAI:
                 "payload": payload
             })
             
-        print("   " + str(len(similar_cases)) + " cas similaires trouves")
+        if not similar_cases:
+            fallback_cases = self._fallback_similar_cases(profile_dict)
+            if fallback_cases:
+                similar_cases = fallback_cases
+                print("   Fallback local: " + str(len(similar_cases)) + " cas similaires trouves")
+            else:
+                print("   " + str(len(similar_cases)) + " cas similaires trouves")
+        else:
+            print("   " + str(len(similar_cases)) + " cas similaires trouves")
         
         if similar_cases:
             print("")
@@ -413,6 +630,20 @@ class SimilarityAgentAI:
         """Etape Finale: Construction de la reponse"""
         stats = state["stats"]
         ai_analysis = state["ai_analysis"]
+
+        confidence_level = str(ai_analysis.get("confidence_level", "low")).lower()
+        confidence_map = {"high": 0.85, "medium": 0.65, "low": 0.45}
+        confidence = confidence_map.get(confidence_level, 0.55)
+        if stats.get("total_similar", 0) >= 10:
+            confidence += 0.05
+        avg_similarity = stats.get("avg_similarity", 0.0)
+        if avg_similarity >= 0.7:
+            confidence += 0.05
+        if stats.get("total_similar", 0) == 0:
+            confidence -= 0.15
+        if avg_similarity < 0.4:
+            confidence -= 0.1
+        confidence = max(0.0, min(1.0, confidence))
         
         result = {
             "profile": state["profile_dict"],
@@ -427,6 +658,7 @@ class SimilarityAgentAI:
                 "average_similarity": round(stats["avg_similarity"], 4)
             },
             "ai_analysis": ai_analysis,
+            "confidence": round(confidence, 4),
             "metadata": {
                 "agent_version": "2.0-AI-LangChain",
                 "llm_model": LLM_MODEL if self.llm_enabled else "fallback"

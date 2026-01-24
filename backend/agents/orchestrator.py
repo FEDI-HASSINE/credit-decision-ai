@@ -200,7 +200,7 @@ class OrchestratorAgent:
             doc_consistency = doc_data.get("consistency_level", "UNKNOWN")
             sim_recommendation = sim_data.get("recommendation", "REVISER")
             
-            if doc_consistency == "LOW" and sim_recommendation == "APPROUVER":
+            if doc_consistency == "LOW" and sim_recommendation in {"APPROUVER", "APPROVE"}:
                 conflicts.append({
                     "type": "doc_similarity_conflict",
                     "severity": "high",
@@ -215,7 +215,7 @@ class OrchestratorAgent:
             behavior_level = behavior_data.get("behavior_level", "UNKNOWN")
             sim_recommendation = sim_output.data.get("ai_analysis", {}).get("recommendation", "REVISER")
             
-            if behavior_level == "HIGH" and sim_recommendation == "APPROUVER":
+            if behavior_level == "HIGH" and sim_recommendation in {"APPROUVER", "APPROVE"}:
                 conflicts.append({
                     "type": "behavior_similarity_conflict",
                     "severity": "medium",
@@ -226,10 +226,13 @@ class OrchestratorAgent:
         # Check fraud flags
         fraud_output = outputs.get("fraud_agent")
         if fraud_output and fraud_output.success:
-            fraud_flags = fraud_output.data.get("fraud_flags", [])
+            fraud_flags = (
+                fraud_output.data.get("fraud_analysis", {}).get("detected_flags")
+                or fraud_output.data.get("fraud_flags", [])
+            )
             if fraud_flags and sim_output:
                 sim_recommendation = sim_output.data.get("ai_analysis", {}).get("recommendation", "REVISER")
-                if sim_recommendation == "APPROUVER":
+                if sim_recommendation in {"APPROUVER", "APPROVE"}:
                     conflicts.append({
                         "type": "fraud_detected",
                         "severity": "critical",
@@ -250,6 +253,7 @@ class OrchestratorAgent:
             "document_flags": [],
             "behavior_flags": [],
             "fraud_flags": [],
+            "image_flags": [],
             "similarity_patterns": [],
             "risk_levels": {},
             "scores": {}
@@ -284,9 +288,18 @@ class OrchestratorAgent:
         # Fraud agent (if present)
         fraud_output = outputs.get("fraud_agent")
         if fraud_output and fraud_output.success:
-            aggregated["fraud_flags"] = fraud_output.data.get("fraud_flags", [])
-            aggregated["scores"]["fraud_risk"] = fraud_output.data.get("fraud_score", 0.0)
-        
+            fraud_analysis = fraud_output.data.get("fraud_analysis", {})
+            aggregated["fraud_flags"] = fraud_analysis.get("detected_flags", []) or fraud_output.data.get("fraud_flags", [])
+            aggregated["scores"]["fraud_risk"] = fraud_analysis.get("fraud_score", fraud_output.data.get("fraud_score", 0.0))
+
+        # Image agent (if present)
+        image_output = outputs.get("image_agent")
+        if image_output and image_output.success:
+            image_analysis = image_output.data.get("image_analysis", {})
+            aggregated["image_flags"] = image_analysis.get("flags", [])
+            aggregated["scores"]["image_risk"] = image_analysis.get("ifs_score", 0.0)
+            aggregated["risk_levels"]["image"] = image_analysis.get("risk_level", "UNKNOWN")
+
         return aggregated
     
     def _compute_global_confidence(
@@ -355,7 +368,13 @@ class OrchestratorAgent:
             indicators.extend(behavior_data.get("behavior_flags", []))
             
             # Fraud flags
-            indicators.extend(output.data.get("fraud_flags", []))
+            fraud_flags = output.data.get("fraud_analysis", {}).get("detected_flags")
+            indicators.extend(fraud_flags or output.data.get("fraud_flags", []))
+
+            # Image flags
+            image_flags = output.data.get("image_analysis", {}).get("flags") or output.data.get("image_flags")
+            if image_flags:
+                indicators.extend(image_flags)
             
             # Similarity red flags
             sim_data = output.data.get("ai_analysis", {})
@@ -397,7 +416,7 @@ class OrchestratorAgent:
         if doc_score < 0.6 or behavior_score > 0.7 or similarity_risk > 0.7:
             return "REJECT"
         
-        if sim_recommendation == "APPROUVER" and confidence >= self.MIN_CONFIDENCE_AUTO:
+        if sim_recommendation in {"APPROUVER", "APPROVE"} and confidence >= self.MIN_CONFIDENCE_AUTO:
             if doc_score >= 0.8 and behavior_score < 0.4:
                 return "APPROVE"
         
@@ -430,7 +449,7 @@ class OrchestratorAgent:
         # Critical risk indicators
         critical_indicators = [
             "FRAUD", "INCOME_MISMATCH", "MISSING_DOCUMENTS", 
-            "DOC_INCONSISTENCY", "MULTIPLE_EDITS"
+            "DOC_INCONSISTENCY", "MULTIPLE_EDITS", "DOC_TAMPER"
         ]
         if any(indicator in risk_indicators for indicator in critical_indicators):
             return True
@@ -458,7 +477,7 @@ class OrchestratorAgent:
         if conflicts:
             triggers.append(f"conflicts_detected_{len(conflicts)}")
         
-        critical_risks = ["FRAUD", "INCOME_MISMATCH", "MISSING_DOCUMENTS"]
+        critical_risks = ["FRAUD", "INCOME_MISMATCH", "MISSING_DOCUMENTS", "DOC_TAMPER"]
         if any(risk in risk_indicators for risk in critical_risks):
             triggers.append("critical_risk_indicators")
         

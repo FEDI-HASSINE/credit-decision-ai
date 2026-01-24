@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import uuid4
 from typing import Dict, Optional, List, Any
 
@@ -17,6 +17,9 @@ from api.schemas import (
     DocumentInfo,
     DecisionInfo,
     Comment,
+    AgentChatRequest,
+    AgentChatResponse,
+    AgentChatMessage,
 )
 from api.deps import get_current_user
 from core.orchestrator import run_orchestrator
@@ -30,9 +33,13 @@ from core.db import (
     add_comment as add_comment_db,
     list_cases_for_client,
 )
+from agents.chat_agent import generate_agent_reply
 
 
 router = APIRouter(prefix="/api")
+
+
+_agent_chats: Dict[str, Dict[str, list[AgentChatMessage]]] = {}
 
 
 def _require_role(user: Dict[str, Any], role: str) -> None:
@@ -102,6 +109,10 @@ def _map_agent_outputs(agent_rows: List[Dict[str, Any]]) -> Optional[AgentBundle
             bundle.fraud = result
         elif name == "behavior":
             bundle.behavior = result
+        elif name == "image":
+            bundle.image = result
+        elif name == "explanation":
+            bundle.explanation = result
     return bundle
 
 
@@ -128,6 +139,39 @@ def _map_comments(comment_rows: List[Dict[str, Any]]) -> List[Comment]:
         )
         for row in comment_rows
     ]
+
+
+def _get_chat_messages(req_id: str, agent_name: str) -> list[AgentChatMessage]:
+    agent_bucket = _agent_chats.setdefault(req_id, {})
+    return agent_bucket.setdefault(agent_name, [])
+
+
+def _build_banker_request(detail: Dict[str, Any]) -> BankerRequest:
+    return BankerRequest(
+        id=str(detail["case_id"]),
+        status=_map_status(detail["status"], detail.get("decision")),
+        created_at=detail["created_at"],
+        updated_at=detail["updated_at"],
+        client_id=str(detail["user_id"]),
+        summary=detail.get("summary"),
+        amount=float(detail["loan_amount"]),
+        duration_months=int(detail["loan_duration"]),
+        monthly_income=float(detail["monthly_income"]),
+        other_income=float(detail.get("other_income") or 0),
+        monthly_charges=float(detail["monthly_charges"]),
+        employment_type=detail.get("employment_type"),
+        contract_type=detail.get("contract_type"),
+        seniority_years=detail.get("seniority_years"),
+        marital_status=detail.get("marital_status"),
+        number_of_children=detail.get("number_of_children"),
+        spouse_employed=detail.get("spouse_employed"),
+        housing_status=detail.get("housing_status"),
+        is_primary_holder=detail.get("is_primary_holder"),
+        documents=_map_documents(detail.get("documents", [])),
+        agents=_map_agent_outputs(detail.get("agent_outputs", [])),
+        comments=_map_comments(detail.get("comments", [])),
+        decision=_map_decision(detail.get("decision")),
+    )
 
 
 # --- Auth ---------------------------------------------------------------------
@@ -230,33 +274,7 @@ def list_requests(status: Optional[str] = None, user: Dict = Depends(get_current
     for detail in records:
         if not detail:
             continue
-        results.append(
-            BankerRequest(
-                id=str(detail["case_id"]),
-                status=_map_status(detail["status"], detail.get("decision")),
-                created_at=detail["created_at"],
-                updated_at=detail["updated_at"],
-                client_id=str(detail["user_id"]),
-                summary=detail.get("summary"),
-                amount=float(detail["loan_amount"]),
-                duration_months=int(detail["loan_duration"]),
-                monthly_income=float(detail["monthly_income"]),
-                other_income=float(detail.get("other_income") or 0),
-                monthly_charges=float(detail["monthly_charges"]),
-                employment_type=detail.get("employment_type"),
-                contract_type=detail.get("contract_type"),
-                seniority_years=detail.get("seniority_years"),
-                marital_status=detail.get("marital_status"),
-                number_of_children=detail.get("number_of_children"),
-                spouse_employed=detail.get("spouse_employed"),
-                housing_status=detail.get("housing_status"),
-                is_primary_holder=detail.get("is_primary_holder"),
-                documents=_map_documents(detail.get("documents", [])),
-                agents=_map_agent_outputs(detail.get("agent_outputs", [])),
-                comments=_map_comments(detail.get("comments", [])),
-                decision=_map_decision(detail.get("decision")),
-            )
-        )
+        results.append(_build_banker_request(detail))
     return results
 
 
@@ -266,31 +284,7 @@ def get_request_detail(req_id: str, user: Dict = Depends(get_current_user)):
     detail = fetch_case_detail(int(req_id))
     if not detail:
         raise HTTPException(status_code=404, detail="Credit request not found")
-    return BankerRequest(
-        id=str(detail["case_id"]),
-        status=_map_status(detail["status"], detail.get("decision")),
-        created_at=detail["created_at"],
-        updated_at=detail["updated_at"],
-        client_id=str(detail["user_id"]),
-        summary=detail.get("summary"),
-        amount=float(detail["loan_amount"]),
-        duration_months=int(detail["loan_duration"]),
-        monthly_income=float(detail["monthly_income"]),
-        other_income=float(detail.get("other_income") or 0),
-        monthly_charges=float(detail["monthly_charges"]),
-        employment_type=detail.get("employment_type"),
-        contract_type=detail.get("contract_type"),
-        seniority_years=detail.get("seniority_years"),
-        marital_status=detail.get("marital_status"),
-        number_of_children=detail.get("number_of_children"),
-        spouse_employed=detail.get("spouse_employed"),
-        housing_status=detail.get("housing_status"),
-        is_primary_holder=detail.get("is_primary_holder"),
-        documents=_map_documents(detail.get("documents", [])),
-        agents=_map_agent_outputs(detail.get("agent_outputs", [])),
-        comments=_map_comments(detail.get("comments", [])),
-        decision=_map_decision(detail.get("decision")),
-    )
+    return _build_banker_request(detail)
 
 
 @router.post("/banker/credit-requests/{req_id}/decision")
@@ -307,6 +301,43 @@ def add_comment(req_id: str, body: CommentCreate, user=Depends(get_current_user)
     _require_role(user, "banker")
     comment = add_comment_db(int(req_id), int(user.get("user_id")), body.message, True)
     return comment
+
+
+@router.get("/banker/credit-requests/{req_id}/agent-chat/{agent_name}", response_model=AgentChatResponse)
+def get_agent_chat(req_id: str, agent_name: str, user: Dict = Depends(get_current_user)):
+    _require_role(user, "banker")
+    detail = fetch_case_detail(int(req_id))
+    if not detail:
+        raise HTTPException(status_code=404, detail="Credit request not found")
+    messages = _get_chat_messages(req_id, agent_name)
+    return AgentChatResponse(agent_name=agent_name, messages=messages)
+
+
+@router.post("/banker/credit-requests/{req_id}/agent-chat", response_model=AgentChatResponse)
+def post_agent_chat(req_id: str, body: AgentChatRequest, user: Dict = Depends(get_current_user)):
+    _require_role(user, "banker")
+    detail = fetch_case_detail(int(req_id))
+    if not detail:
+        raise HTTPException(status_code=404, detail="Credit request not found")
+
+    agent_name = body.agent_name.lower().strip()
+    if not agent_name:
+        raise HTTPException(status_code=400, detail="agent_name is required")
+
+    messages = _get_chat_messages(req_id, agent_name)
+    user_message = AgentChatMessage(role="banker", content=body.message, created_at=datetime.now(timezone.utc))
+    messages.append(user_message)
+
+    history_payload = [m.model_dump() for m in messages]
+    request_payload = _build_banker_request(detail).model_dump()
+    reply = generate_agent_reply(agent_name, request_payload, history_payload)
+    assistant_message = AgentChatMessage(role="agent", content=reply, created_at=datetime.now(timezone.utc))
+    messages.append(assistant_message)
+
+    if len(messages) > 50:
+        del messages[:-50]
+
+    return AgentChatResponse(agent_name=agent_name, messages=messages)
 
 
 @router.post("/banker/credit-requests/{req_id}/rerun")

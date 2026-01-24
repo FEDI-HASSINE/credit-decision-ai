@@ -2,7 +2,10 @@ import { useEffect, useState, FormEvent } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { http } from "../../api/http";
 import { AgentPanel } from "../../components/agents/AgentPanel";
+import { AgentChatPanel } from "../../components/agents/AgentChatPanel";
 import { BankerRequest, DecisionCreate } from "../../api/types";
+
+const AGENTS = ["document", "behavior", "similarity", "image", "fraud", "explanation"];
 
 export const BankerRequestDetailPage = () => {
   const { id } = useParams();
@@ -13,6 +16,7 @@ export const BankerRequestDetailPage = () => {
   const [decision, setDecision] = useState<DecisionCreate["decision"]>("approve");
   const [note, setNote] = useState("");
   const [comment, setComment] = useState("");
+  const [selectedAgent, setSelectedAgent] = useState<string>("document");
 
   const load = async () => {
     try {
@@ -108,6 +112,7 @@ export const BankerRequestDetailPage = () => {
       {data.agents?.document && <AgentPanel title="Agent Documents" agent={data.agents.document} />}
       {data.agents?.similarity && <AgentPanel title="Agent Similarité" agent={data.agents.similarity} />}
       {data.agents?.behavior && <AgentPanel title="Agent Comportement" agent={data.agents.behavior} />}
+      {data.agents?.image && <AgentPanel title="Agent Image" agent={data.agents.image} />}
       {data.agents?.fraud && <AgentPanel title="Agent Fraude" agent={data.agents.fraud} />}
 
       <div className="card">
@@ -161,6 +166,28 @@ export const BankerRequestDetailPage = () => {
           </button>
         </form>
       </div>
+
+      <div className="card">
+        <h3>Discuter avec un agent</h3>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+          {AGENTS.map((agent) => (
+            <button
+              key={agent}
+              type="button"
+              className="button-primary"
+              style={{
+                background: selectedAgent === agent ? "#0f172a" : "#e2e8f0",
+                color: selectedAgent === agent ? "#fff" : "#0f172a",
+              }}
+              onClick={() => setSelectedAgent(agent)}
+            >
+              {agent}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {id && <AgentChatPanel requestId={id} agentName={selectedAgent} />}
     </div>
   );
 };

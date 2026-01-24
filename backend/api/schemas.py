@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import List, Optional, Literal, Dict, Any
+
 from pydantic import BaseModel, Field
 
 
@@ -30,11 +31,20 @@ class CreditRequestCreate(BaseModel):
     family_status: str
     documents: List[str] = Field(default_factory=list)
 
-    other_income: float = 0
-    number_of_children: int = 0
+    other_income: Optional[float] = 0.0
+    marital_status: Optional[str] = None
+    number_of_children: Optional[int] = 0
     spouse_employed: Optional[bool] = None
     housing_status: Optional[str] = None
-    is_primary_holder: Optional[bool] = None
+    is_primary_holder: Optional[bool] = True
+
+    telemetry: Optional[Dict[str, Any]] = None
+    documents_payloads: Optional[List[Dict[str, Any]]] = None
+    document_texts: Optional[Dict[str, str]] = None
+    transaction_flags: Optional[List[str]] = None
+    image_flags: Optional[List[str]] = None
+    free_text: Optional[List[str]] = None
+    declared_profile: Optional[Dict[str, Any]] = None
 
 
 class AgentResult(BaseModel):
@@ -51,6 +61,7 @@ class AgentBundle(BaseModel):
     fraud: Optional[AgentResult] = None
     explanation: Optional[AgentResult] = None
     behavior: Optional[AgentResult] = None
+    image: Optional[AgentResult] = None
 
 
 class DocumentInfo(BaseModel):
@@ -68,6 +79,22 @@ class DecisionInfo(BaseModel):
     note: Optional[str] = None
     decided_by: Optional[str] = None
     decided_at: Optional[datetime] = None
+
+
+class AgentChatMessage(BaseModel):
+    role: Literal["banker", "agent"]
+    content: str
+    created_at: datetime
+
+
+class AgentChatRequest(BaseModel):
+    agent_name: str
+    message: str
+
+
+class AgentChatResponse(BaseModel):
+    agent_name: str
+    messages: List[AgentChatMessage]
 
 
 class DecisionCreate(BaseModel):
