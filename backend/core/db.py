@@ -1,7 +1,9 @@
 import os
 import json
 import hashlib
-from typing import Optional, Dict, Any, List
+import time
+from datetime import date
+from typing import Optional, Dict, Any, List, Tuple
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -21,8 +23,49 @@ def _get_db_params() -> Dict[str, str]:
     }
 
 
+def _host_candidates(primary: str) -> List[str]:
+    candidates: List[str] = []
+    if primary:
+        candidates.append(primary)
+    if primary != "postgres":
+        candidates.append("postgres")
+    candidates.extend(["host.docker.internal", "localhost", "127.0.0.1"])
+    seen = set()
+    deduped: List[str] = []
+    for host in candidates:
+        if host and host not in seen:
+            deduped.append(host)
+            seen.add(host)
+    return deduped
+
+
 def _connect():
-    return psycopg2.connect(**_get_db_params())
+    params = _get_db_params()
+    retries = int(os.getenv("DB_CONNECT_RETRIES", "5"))
+    delay = float(os.getenv("DB_CONNECT_DELAY", "1.0"))
+    last_exc: Optional[Exception] = None
+    for host in _host_candidates(params.get("host") or "postgres"):
+        params["host"] = host
+        for attempt in range(retries):
+            try:
+                return psycopg2.connect(**params)
+            except psycopg2.OperationalError as exc:
+                last_exc = exc
+                msg = str(exc).lower()
+                transient = (
+                    "could not translate host name" in msg
+                    or "name or service not known" in msg
+                    or "temporary failure in name resolution" in msg
+                    or "could not connect to server" in msg
+                    or "connection refused" in msg
+                )
+                if not transient or attempt == retries - 1:
+                    break
+                time.sleep(delay)
+        # try next host candidate
+    if last_exc:
+        raise last_exc
+    raise psycopg2.OperationalError("Unable to connect to database")
 
 
 def init_db() -> None:
@@ -89,6 +132,95 @@ def init_db() -> None:
                         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                         UNIQUE (case_id, agent_name)
                     )
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS loans (
+                        loan_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                        user_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                        case_id BIGINT UNIQUE REFERENCES credit_cases(case_id) ON DELETE SET NULL,
+                        principal_amount NUMERIC(14,2) NOT NULL CHECK (principal_amount > 0),
+                        interest_rate NUMERIC(5,4) NOT NULL CHECK (interest_rate >= 0),
+                        term_months INTEGER NOT NULL CHECK (term_months > 0),
+                        status TEXT NOT NULL CHECK (status IN ('ACTIVE', 'CLOSED', 'DEFAULTED', 'CANCELLED')),
+                        approved_at TIMESTAMPTZ,
+                        start_date DATE,
+                        end_date DATE,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS installments (
+                        installment_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                        loan_id BIGINT NOT NULL REFERENCES loans(loan_id) ON DELETE CASCADE,
+                        installment_number INTEGER NOT NULL CHECK (installment_number > 0),
+                        due_date DATE NOT NULL,
+                        amount_due NUMERIC(14,2) NOT NULL CHECK (amount_due >= 0),
+                        status TEXT NOT NULL CHECK (status IN ('PENDING', 'PAID', 'LATE', 'MISSED')),
+                        amount_paid NUMERIC(14,2) NOT NULL DEFAULT 0 CHECK (amount_paid >= 0),
+                        paid_at DATE,
+                        days_late INTEGER,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        UNIQUE (loan_id, installment_number)
+                    )
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS payments (
+                        payment_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                        loan_id BIGINT NOT NULL REFERENCES loans(loan_id) ON DELETE CASCADE,
+                        installment_id BIGINT REFERENCES installments(installment_id) ON DELETE SET NULL,
+                        payment_date DATE NOT NULL,
+                        amount NUMERIC(14,2) NOT NULL,
+                        channel TEXT NOT NULL CHECK (channel IN ('bank_transfer', 'card', 'cash', 'direct_debit', 'mobile')),
+                        status TEXT NOT NULL CHECK (status IN ('COMPLETED', 'PENDING', 'FAILED', 'REVERSED')),
+                        is_reversal BOOLEAN NOT NULL DEFAULT FALSE,
+                        reversal_of BIGINT REFERENCES payments(payment_id) ON DELETE SET NULL,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS payment_behavior_summary (
+                        summary_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                        user_id BIGINT NOT NULL UNIQUE REFERENCES users(user_id) ON DELETE CASCADE,
+                        total_loans INTEGER NOT NULL DEFAULT 0,
+                        total_installments INTEGER NOT NULL DEFAULT 0,
+                        on_time_installments INTEGER NOT NULL DEFAULT 0,
+                        late_installments INTEGER NOT NULL DEFAULT 0,
+                        missed_installments INTEGER NOT NULL DEFAULT 0,
+                        on_time_rate NUMERIC(5,4) NOT NULL DEFAULT 0,
+                        avg_days_late NUMERIC(6,2) NOT NULL DEFAULT 0,
+                        max_days_late INTEGER NOT NULL DEFAULT 0,
+                        avg_payment_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+                        last_payment_date DATE,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_loans_user_id ON loans(user_id)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_installments_loan_id ON installments(loan_id)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_payments_loan_id ON payments(loan_id)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_payments_installment_id ON payments(installment_id)
                     """
                 )
                 cur.execute(
@@ -440,7 +572,7 @@ def list_cases_for_banker(status_filter: Optional[str] = None) -> List[Dict[str,
                     """
                 )
             case_ids = [row["case_id"] for row in cur.fetchall()]
-        return [fetch_case_detail(case_id) for case_id in case_ids if case_id is not None]
+        return [fetch_case_overview(case_id) for case_id in case_ids if case_id is not None]
     finally:
         conn.close()
 
@@ -459,12 +591,91 @@ def list_cases_for_client(user_id: int) -> List[Dict[str, Any]]:
                 (user_id,),
             )
             case_ids = [row["case_id"] for row in cur.fetchall()]
-        return [fetch_case_detail_for_client(case_id, user_id) for case_id in case_ids if case_id is not None]
+        return [fetch_case_overview_for_client(case_id, user_id) for case_id in case_ids if case_id is not None]
     finally:
         conn.close()
 
 
-def fetch_case_detail(case_id: int) -> Optional[Dict[str, Any]]:
+def fetch_case_overview(case_id: int) -> Optional[Dict[str, Any]]:
+    conn = _connect()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                    c.case_id,
+                    c.user_id,
+                    c.status,
+                    c.loan_amount,
+                    c.loan_duration,
+                    c.summary,
+                    c.auto_decision,
+                    c.auto_decision_confidence,
+                    c.auto_review_required,
+                    c.created_at,
+                    c.updated_at,
+                    f.monthly_income,
+                    f.other_income,
+                    f.monthly_charges,
+                    f.employment_type,
+                    f.contract_type,
+                    f.seniority_years,
+                    f.marital_status,
+                    f.number_of_children,
+                    f.spouse_employed,
+                    f.housing_status,
+                    f.is_primary_holder
+                FROM credit_cases c
+                JOIN financial_profile f ON f.case_id = c.case_id
+                WHERE c.case_id = %s
+                """,
+                (case_id,),
+            )
+            base = cur.fetchone()
+            if not base:
+                return None
+
+            cur.execute(
+                """
+                SELECT decision, confidence, reason_codes, note, decided_by, decided_at
+                FROM decisions
+                WHERE case_id = %s
+                """,
+                (case_id,),
+            )
+            decision = cur.fetchone()
+
+            base["documents"] = []
+            base["agent_outputs"] = []
+            base["comments"] = []
+            base["decision"] = decision
+            return base
+    finally:
+        conn.close()
+
+
+def fetch_case_overview_for_client(case_id: int, user_id: int) -> Optional[Dict[str, Any]]:
+    conn = _connect()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT case_id
+                FROM credit_cases
+                WHERE case_id = %s AND user_id = %s
+                """,
+                (case_id, user_id),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+        detail = fetch_case_overview(case_id)
+        return detail
+    finally:
+        conn.close()
+
+
+def fetch_case_detail(case_id: int, include_payments: bool = True) -> Optional[Dict[str, Any]]:
     conn = _connect()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -546,16 +757,75 @@ def fetch_case_detail(case_id: int) -> Optional[Dict[str, Any]]:
             )
             comments = cur.fetchall()
 
+            loan = None
+            installments: List[Dict[str, Any]] = []
+            payments: List[Dict[str, Any]] = []
+            payment_summary = None
+            if include_payments:
+                cur.execute(
+                    """
+                    SELECT loan_id, user_id, case_id, principal_amount, interest_rate, term_months,
+                           status, approved_at, start_date, end_date, created_at
+                    FROM loans
+                    WHERE case_id = %s
+                    """,
+                    (case_id,),
+                )
+                loan = cur.fetchone()
+
+                if loan and loan.get("loan_id") is not None:
+                    loan_id = int(loan["loan_id"])
+                    cur.execute(
+                        """
+                        SELECT installment_id, loan_id, installment_number, due_date, amount_due,
+                               status, amount_paid, paid_at, days_late, created_at
+                        FROM installments
+                        WHERE loan_id = %s
+                        ORDER BY installment_number ASC
+                        """,
+                        (loan_id,),
+                    )
+                    installments = cur.fetchall()
+
+                    cur.execute(
+                        """
+                        SELECT payment_id, loan_id, installment_id, payment_date, amount, channel,
+                               status, is_reversal, reversal_of, created_at
+                        FROM payments
+                        WHERE loan_id = %s
+                        ORDER BY payment_date ASC, payment_id ASC
+                        """,
+                        (loan_id,),
+                    )
+                    payments = cur.fetchall()
+
+                cur.execute(
+                    """
+                    SELECT summary_id, user_id, total_loans, total_installments, on_time_installments,
+                           late_installments, missed_installments, on_time_rate, avg_days_late,
+                           max_days_late, avg_payment_amount, last_payment_date, updated_at
+                    FROM payment_behavior_summary
+                    WHERE user_id = %s
+                    """,
+                    (base["user_id"],),
+                )
+                payment_summary = cur.fetchone()
+
             base["documents"] = documents
             base["agent_outputs"] = agents
             base["decision"] = decision
             base["comments"] = comments
+            if include_payments:
+                base["loan"] = loan
+                base["installments"] = installments
+                base["payments"] = payments
+                base["payment_behavior_summary"] = payment_summary
             return base
     finally:
         conn.close()
 
 
-def fetch_case_detail_for_client(case_id: int, user_id: int) -> Optional[Dict[str, Any]]:
+def fetch_case_detail_for_client(case_id: int, user_id: int, include_payments: bool = True) -> Optional[Dict[str, Any]]:
     conn = _connect()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -570,7 +840,7 @@ def fetch_case_detail_for_client(case_id: int, user_id: int) -> Optional[Dict[st
             row = cur.fetchone()
             if not row:
                 return None
-        detail = fetch_case_detail(case_id)
+        detail = fetch_case_detail(case_id, include_payments=include_payments)
         if detail:
             detail["comments"] = [c for c in detail.get("comments", []) if c.get("is_public")]
         return detail
@@ -616,6 +886,8 @@ def upsert_decision(case_id: int, decision: str, note: Optional[str], banker_id:
                     """,
                     (status, case_id),
                 )
+                if decision_upper == "APPROVE":
+                    _ensure_loan_for_case(cur, case_id)
                 return decision_row
     finally:
         conn.close()
@@ -646,3 +918,181 @@ def add_comment(case_id: int, author_id: int, message: str, is_public: bool = Tr
                 return comment
     finally:
         conn.close()
+
+
+def _add_months(d: date, months: int) -> date:
+    year = d.year + (d.month - 1 + months) // 12
+    month = (d.month - 1 + months) % 12 + 1
+    day = min(d.day, _days_in_month(year, month))
+    return date(year, month, day)
+
+
+def _days_in_month(year: int, month: int) -> int:
+    if month in (1, 3, 5, 7, 8, 10, 12):
+        return 31
+    if month in (4, 6, 9, 11):
+        return 30
+    # February
+    is_leap = (year % 4 == 0 and year % 100 != 0) or (year % 400 == 0)
+    return 29 if is_leap else 28
+
+
+def _ensure_loan_for_case(cur, case_id: int) -> Optional[int]:
+    cur.execute(
+        """
+        SELECT loan_id FROM loans WHERE case_id = %s
+        """,
+        (case_id,),
+    )
+    row = cur.fetchone()
+    if row:
+        return int(row["loan_id"]) if isinstance(row, dict) else int(row[0])
+
+    cur.execute(
+        """
+        SELECT user_id, loan_amount, loan_duration
+        FROM credit_cases
+        WHERE case_id = %s
+        """,
+        (case_id,),
+    )
+    case_row = cur.fetchone()
+    if not case_row:
+        return None
+    user_id = case_row["user_id"]
+    principal = float(case_row["loan_amount"])
+    term_months = int(case_row["loan_duration"])
+    interest_rate = 0.05
+
+    today = date.today()
+    end_date = _add_months(today, term_months)
+
+    cur.execute(
+        """
+        INSERT INTO loans (
+            user_id,
+            case_id,
+            principal_amount,
+            interest_rate,
+            term_months,
+            status,
+            approved_at,
+            start_date,
+            end_date
+        )
+        VALUES (%s, %s, %s, %s, %s, 'ACTIVE', NOW(), %s, %s)
+        RETURNING loan_id
+        """,
+        (user_id, case_id, principal, interest_rate, term_months, today, end_date),
+    )
+    loan_id = cur.fetchone()["loan_id"]
+
+    total_with_interest = principal * (1 + interest_rate * (term_months / 12.0))
+    monthly_amount = round(total_with_interest / term_months, 2)
+    for n in range(1, term_months + 1):
+        due_date = _add_months(today, n)
+        cur.execute(
+            """
+            INSERT INTO installments (
+                loan_id, installment_number, due_date, amount_due, status
+            )
+            VALUES (%s, %s, %s, %s, 'PENDING')
+            """,
+            (loan_id, n, due_date, monthly_amount),
+        )
+
+    return int(loan_id)
+
+
+def fetch_loan_by_case(case_id: int) -> Optional[Dict[str, Any]]:
+    conn = _connect()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT loan_id, user_id, case_id, principal_amount, interest_rate, term_months,
+                       status, approved_at, start_date, end_date, created_at
+                FROM loans
+                WHERE case_id = %s
+                """,
+                (case_id,),
+            )
+            return cur.fetchone()
+    finally:
+        conn.close()
+
+
+def fetch_installments_by_loan(loan_id: int) -> List[Dict[str, Any]]:
+    conn = _connect()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT installment_id, loan_id, installment_number, due_date, amount_due,
+                       status, amount_paid, paid_at, days_late, created_at
+                FROM installments
+                WHERE loan_id = %s
+                ORDER BY installment_number ASC
+                """,
+                (loan_id,),
+            )
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+
+def fetch_payments_by_loan(loan_id: int) -> List[Dict[str, Any]]:
+    conn = _connect()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT payment_id, loan_id, installment_id, payment_date, amount, channel,
+                       status, is_reversal, reversal_of, created_at
+                FROM payments
+                WHERE loan_id = %s
+                ORDER BY payment_date ASC, payment_id ASC
+                """,
+                (loan_id,),
+            )
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+
+def fetch_payment_behavior_summary(user_id: int) -> Optional[Dict[str, Any]]:
+    conn = _connect()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT summary_id, user_id, total_loans, total_installments, on_time_installments,
+                       late_installments, missed_installments, on_time_rate, avg_days_late,
+                       max_days_late, avg_payment_amount, last_payment_date, updated_at
+                FROM payment_behavior_summary
+                WHERE user_id = %s
+                """,
+                (user_id,),
+            )
+            return cur.fetchone()
+    finally:
+        conn.close()
+
+
+def fetch_payment_context(user_id: int, case_id: Optional[int] = None) -> Dict[str, Any]:
+    loan = None
+    installments: List[Dict[str, Any]] = []
+    payments: List[Dict[str, Any]] = []
+    if case_id is not None:
+        loan = fetch_loan_by_case(case_id)
+        if loan and loan.get("loan_id") is not None:
+            loan_id = int(loan["loan_id"])
+            installments = fetch_installments_by_loan(loan_id)
+            payments = fetch_payments_by_loan(loan_id)
+    summary = fetch_payment_behavior_summary(user_id)
+    return {
+        "loan": loan,
+        "installments": installments,
+        "payments": payments,
+        "payment_behavior_summary": summary,
+    }

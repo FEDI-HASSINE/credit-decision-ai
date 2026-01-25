@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import re
 from typing import Any, Dict, List, Optional
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -23,6 +24,37 @@ LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
 def _llm_client():
     if not OPENAI_API_KEY:
         return None
+
+
+def _extract_json_text(raw: Optional[str]) -> Optional[str]:
+    if not raw:
+        return None
+    cleaned = raw.replace("```json", "```").replace("```", "").strip()
+    if cleaned.startswith("{") and cleaned.endswith("}"):
+        return cleaned
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return cleaned[start : end + 1]
+    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+    if match:
+        return match.group(0)
+    return None
+
+
+def _parse_llm_json(raw: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not raw:
+        return None
+    import json
+
+    json_text = _extract_json_text(raw)
+    if not json_text:
+        return None
+    try:
+        parsed = json.loads(json_text)
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
     try:
         openai_mod = importlib.import_module("openai")
         OpenAI = getattr(openai_mod, "OpenAI")
@@ -53,11 +85,79 @@ def _rag_lookup_reason(reason_code: str) -> Dict[str, str]:
             "description": "Document checks surfaced inconsistencies requiring manual review.",
             "source": "document_analysis",
         },
+        "PAYMENT_HISTORY_GOOD": {
+            "description": "Repayment history shows on-time payments with minimal delays.",
+            "source": "payment_behavior_summary",
+        },
+        "PAYMENT_HISTORY_POOR": {
+            "description": "Repayment history shows recurring delays or missed installments.",
+            "source": "payment_behavior_summary",
+        },
     }
     return catalog.get(reason_code, {
         "description": "Reason code definition not available in local cache.",
         "source": "rag_lookup_missing",
     })
+
+
+def _payment_insights(summary: Optional[Dict[str, Any]]) -> List[str]:
+    if not isinstance(summary, dict):
+        return []
+    try:
+        on_time_rate = float(summary.get("on_time_rate") or 0)
+    except (TypeError, ValueError):
+        on_time_rate = 0.0
+    try:
+        avg_days_late = float(summary.get("avg_days_late") or 0)
+    except (TypeError, ValueError):
+        avg_days_late = 0.0
+    try:
+        max_days_late = int(summary.get("max_days_late") or 0)
+    except (TypeError, ValueError):
+        max_days_late = 0
+    try:
+        missed = int(summary.get("missed_installments") or 0)
+    except (TypeError, ValueError):
+        missed = 0
+
+    insights: List[str] = []
+    if on_time_rate >= 0.95 and missed == 0 and max_days_late <= 3:
+        insights.append("Historique: paiements toujours a l'heure.")
+    elif on_time_rate <= 0.8 or missed >= 2 or max_days_late >= 30:
+        insights.append("Historique: retards frequents ou echeances manquantes.")
+    else:
+        insights.append("Historique: quelques retards, globalement acceptable.")
+
+    if avg_days_late > 0:
+        insights.append(f"Retard moyen: {round(avg_days_late,1)} jours.")
+    if max_days_late > 0:
+        insights.append(f"Retard maximum: {max_days_late} jours.")
+    if missed > 0:
+        insights.append(f"Echeances manquantes: {missed}.")
+    return insights
+
+
+def _payment_signal(summary: Optional[Dict[str, Any]]) -> Optional[str]:
+    if not isinstance(summary, dict):
+        return None
+    try:
+        on_time_rate = float(summary.get("on_time_rate") or 0)
+    except (TypeError, ValueError):
+        on_time_rate = 0.0
+    try:
+        missed = int(summary.get("missed_installments") or 0)
+    except (TypeError, ValueError):
+        missed = 0
+    try:
+        max_days_late = int(summary.get("max_days_late") or 0)
+    except (TypeError, ValueError):
+        max_days_late = 0
+
+    if on_time_rate >= 0.95 and missed == 0 and max_days_late <= 3:
+        return "PAYMENT_HISTORY_GOOD"
+    if on_time_rate <= 0.8 or missed >= 2 or max_days_late >= 30:
+        return "PAYMENT_HISTORY_POOR"
+    return "PAYMENT_HISTORY_MIXED"
 
 
 def _generate_customer_explanation(flags: List[str], key_factors: List[Dict[str, Any]], next_steps: List[str]) -> Dict[str, Any]:
@@ -85,13 +185,9 @@ Réponds en JSON: {{"summary": "...", "main_reasons": [..], "next_steps": [...]}
             except Exception:
                 content = None
         if content:
-            import json
-            try:
-                parsed = json.loads(content)
-                if isinstance(parsed, dict) and "summary" in parsed:
-                    return parsed
-            except Exception:
-                pass
+            parsed = _parse_llm_json(content)
+            if isinstance(parsed, dict) and "summary" in parsed:
+                return parsed
 
     fallback_summary = "Votre dossier est en cours de revue. Nous clarifions certains éléments avant décision."
     fallback_reasons = [kf.get("description", "Raison à préciser") for kf in key_factors] or flags or ["Revue complémentaire requise."]
@@ -174,6 +270,7 @@ def node_collect_signals(state: ExplanationState) -> ExplanationState:
     behavior_result = state.get("behavior_result") or {}
     fraud_result = state.get("fraud_result") or {}
     image_result = state.get("image_result") or {}
+    payment_summary = state.get("payment_behavior_summary")
 
     signals: List[str] = []
 
@@ -207,6 +304,10 @@ def node_collect_signals(state: ExplanationState) -> ExplanationState:
         i_flags = image_analysis.get("tamper_flags") or image_analysis.get("flags")
     if i_flags:
         signals.extend(_safe_list(i_flags))
+
+    payment_flag = _payment_signal(payment_summary)
+    if payment_flag:
+        signals.append(payment_flag)
 
     deduped = []
     seen = set()
@@ -244,6 +345,17 @@ def node_generate_internal_summary(state: ExplanationState) -> ExplanationState:
         parts.append("Key factors: " + ", ".join([kf.get("reason_code", "") for kf in key_factors]))
     if signals:
         parts.append("Supporting signals: " + ", ".join(signals[:5]))
+    payment_summary = state.get("payment_behavior_summary")
+    if isinstance(payment_summary, dict):
+        try:
+            on_time_rate = float(payment_summary.get("on_time_rate") or 0)
+        except (TypeError, ValueError):
+            on_time_rate = 0.0
+        try:
+            missed = int(payment_summary.get("missed_installments") or 0)
+        except (TypeError, ValueError):
+            missed = 0
+        parts.append(f"Payment history: {round(on_time_rate*100)}% on-time, missed {missed}.")
 
     summary = " | ".join(parts) or "Application under review; no dominant factors listed."
     return {**state, "internal_summary": summary}
@@ -252,6 +364,9 @@ def node_generate_internal_summary(state: ExplanationState) -> ExplanationState:
 def node_generate_customer_summary(state: ExplanationState) -> ExplanationState:
     flags = state.get("supporting_signals", [])
     key_factors = state.get("key_factors", [])
+    payment_insights = _payment_insights(state.get("payment_behavior_summary"))
+    for insight in payment_insights:
+        key_factors = list(key_factors) + [{"reason_code": "PAYMENT_HISTORY", "description": insight, "source": "payment_behavior_summary"}]
     next_steps = state.get("customer_next_steps") or [
         "Fournir des justificatifs actualisés si demandé",
         "Vérifier les informations d'emploi et de revenus",
@@ -339,6 +454,7 @@ def explain_decision(
     behavior_result: Optional[Dict[str, Any]] = None,
     fraud_result: Optional[Dict[str, Any]] = None,
     image_result: Optional[Dict[str, Any]] = None,
+    payment_behavior_summary: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     if not isinstance(decision, dict):
         decision = {"decision": decision}
@@ -351,6 +467,7 @@ def explain_decision(
         "behavior_result": behavior_result or {},
         "fraud_result": fraud_result or {},
         "image_result": image_result or {},
+        "payment_behavior_summary": payment_behavior_summary,
     }
 
     if _LANGGRAPH_AVAILABLE:

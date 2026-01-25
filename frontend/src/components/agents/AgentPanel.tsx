@@ -1,9 +1,46 @@
 import { AgentResult } from "../../api/types";
+import { StructuredOutput } from "./StructuredOutput";
 
 interface Props {
   title: string;
   agent: AgentResult;
 }
+
+const DOCUMENT_FLAG_LABELS: Record<string, string> = {
+  INCOME_MISMATCH: "Revenus déclarés ≠ documents",
+  CONTRACT_MISMATCH: "Contrat incohérent",
+  SENIORITY_MISMATCH: "Ancienneté incohérente",
+  MISSING_KEY_FIELDS: "Champs clés manquants",
+  MISSING_DOCUMENTS: "Documents manquants",
+  GENERIC_TEXT_TEMPLATE: "Document trop générique",
+};
+
+const BEHAVIOR_FLAG_LABELS: Record<string, string> = {
+  LOW_ON_TIME_RATE: "Taux à l’heure faible",
+  LATE_PAYMENTS_AVG: "Retards moyens élevés",
+  MAX_LATE_HIGH: "Retard max élevé",
+  MISSED_INSTALLMENTS: "Tranches manquées",
+  REPEATED_MISSES: "Manquements répétés",
+  PAYMENT_HISTORY_EXCELLENT: "Historique excellent",
+  PAYMENT_HISTORY_GOOD: "Historique bon",
+  PAYMENT_HISTORY_MIXED: "Historique mitigé",
+  PAYMENT_HISTORY_POOR: "Historique mauvais",
+  NO_PAYMENT_HISTORY: "Aucun historique de paiement",
+  RAPID_SUBMISSION: "Soumission très rapide",
+  LONG_HESITATION: "Hésitation longue",
+  MULTIPLE_EDITS: "Nombreuses modifications",
+  INCOME_REWRITES: "Réécritures des revenus",
+  DOCUMENT_REUPLOADS: "Réuploads de documents",
+  BACK_AND_FORTH: "Allers-retours",
+  MISSING_TELEMETRY: "Télémetrie manquante",
+};
+
+const getFlagLabel = (flag: string, agentName?: string) => {
+  const key = flag.toUpperCase();
+  if (agentName === "document" && DOCUMENT_FLAG_LABELS[key]) return DOCUMENT_FLAG_LABELS[key];
+  if (agentName === "behavior" && BEHAVIOR_FLAG_LABELS[key]) return BEHAVIOR_FLAG_LABELS[key];
+  return flag;
+};
 
 export const AgentPanel = ({ title, agent }: Props) => {
   const rawExpl = agent.explanations;
@@ -33,6 +70,12 @@ export const AgentPanel = ({ title, agent }: Props) => {
   const internalSummary = typeof internal?.summary === "string" ? internal.summary : undefined;
   const flagMap = explanations?.flag_explanations || {};
   const flagEntries = Object.entries(flagMap);
+  const agentName = agent.name || title.toLowerCase();
+  const hasReadableSummary =
+    Boolean(explanations?.global_summary) ||
+    Boolean(customerSummary) ||
+    Boolean(internalSummary) ||
+    flagEntries.length > 0;
 
   return (
     <div className="card">
@@ -53,7 +96,7 @@ export const AgentPanel = ({ title, agent }: Props) => {
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
             {agent.flags.map((flag) => (
               <span key={flag} className="badge" style={{ background: "#fef3c7", color: "#92400e" }}>
-                {flag}
+                {getFlagLabel(flag, agentName)}
               </span>
             ))}
           </div>
@@ -90,10 +133,18 @@ export const AgentPanel = ({ title, agent }: Props) => {
           <ul style={{ paddingLeft: 16 }}>
             {flagEntries.map(([flag, desc]) => (
               <li key={flag} style={{ color: "#475569" }}>
-                <strong>{flag}:</strong> {String(desc)}
+                <strong>{getFlagLabel(flag, agentName)}:</strong> {String(desc)}
               </li>
             ))}
           </ul>
+        </div>
+      )}
+      {!hasReadableSummary && explanations && (
+        <div style={{ marginTop: 8 }}>
+          <strong>Données:</strong>
+          <div style={{ marginTop: 6, fontSize: 12 }}>
+            <StructuredOutput value={explanations as unknown as Record<string, unknown>} />
+          </div>
         </div>
       )}
     </div>

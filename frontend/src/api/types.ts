@@ -82,6 +82,62 @@ export interface DecisionInfo {
   decided_at?: string;
 }
 
+export interface LoanInfo {
+  loan_id: number;
+  user_id: number;
+  case_id?: number;
+  principal_amount: number;
+  interest_rate: number;
+  term_months: number;
+  status: string;
+  approved_at?: string;
+  start_date?: string;
+  end_date?: string;
+  created_at: string;
+}
+
+export interface InstallmentInfo {
+  installment_id: number;
+  loan_id: number;
+  installment_number: number;
+  due_date: string;
+  amount_due: number;
+  status: string;
+  amount_paid: number;
+  paid_at?: string;
+  days_late?: number;
+  created_at: string;
+}
+
+export interface PaymentInfo {
+  payment_id: number;
+  loan_id: number;
+  installment_id?: number;
+  payment_date: string;
+  amount: number;
+  channel: string;
+  status: string;
+  is_reversal: boolean;
+  reversal_of?: number | null;
+  created_at: string;
+}
+
+export interface PaymentBehaviorSummary {
+  summary_id: number;
+  user_id: number;
+  total_loans: number;
+  total_installments: number;
+  on_time_installments: number;
+  late_installments: number;
+  missed_installments: number;
+  on_time_rate: number;
+  avg_days_late: number;
+  max_days_late: number;
+  avg_payment_amount: number;
+  last_payment_date?: string;
+  updated_at: string;
+}
+
 export interface CreditRequest {
   id: string;
   status: "pending" | "in_review" | "approved" | "rejected";
@@ -96,6 +152,10 @@ export interface CreditRequest {
   auto_decision?: string;
   auto_decision_confidence?: number;
   auto_review_required?: boolean;
+  loan?: LoanInfo;
+  installments?: InstallmentInfo[];
+  payments?: PaymentInfo[];
+  payment_behavior_summary?: PaymentBehaviorSummary;
 }
 
 export interface BankerRequest {
@@ -125,6 +185,10 @@ export interface BankerRequest {
   auto_decision?: string;
   auto_decision_confidence?: number;
   auto_review_required?: boolean;
+  loan?: LoanInfo;
+  installments?: InstallmentInfo[];
+  payments?: PaymentInfo[];
+  payment_behavior_summary?: PaymentBehaviorSummary;
 }
 
 export interface AgentChatMessage {

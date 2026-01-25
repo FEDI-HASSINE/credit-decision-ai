@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, date
 from typing import List, Optional, Literal, Dict, Any
 
 from pydantic import BaseModel, Field
@@ -81,6 +81,62 @@ class DecisionInfo(BaseModel):
     decided_at: Optional[datetime] = None
 
 
+class LoanInfo(BaseModel):
+    loan_id: int
+    user_id: int
+    case_id: Optional[int] = None
+    principal_amount: float
+    interest_rate: float
+    term_months: int
+    status: str
+    approved_at: Optional[datetime] = None
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    created_at: datetime
+
+
+class InstallmentInfo(BaseModel):
+    installment_id: int
+    loan_id: int
+    installment_number: int
+    due_date: date
+    amount_due: float
+    status: str
+    amount_paid: float
+    paid_at: Optional[date] = None
+    days_late: Optional[int] = None
+    created_at: datetime
+
+
+class PaymentInfo(BaseModel):
+    payment_id: int
+    loan_id: int
+    installment_id: Optional[int] = None
+    payment_date: date
+    amount: float
+    channel: str
+    status: str
+    is_reversal: bool
+    reversal_of: Optional[int] = None
+    created_at: datetime
+
+
+class PaymentBehaviorSummary(BaseModel):
+    summary_id: int
+    user_id: int
+    total_loans: int
+    total_installments: int
+    on_time_installments: int
+    late_installments: int
+    missed_installments: int
+    on_time_rate: float
+    avg_days_late: float
+    max_days_late: int
+    avg_payment_amount: float
+    last_payment_date: Optional[date] = None
+    updated_at: datetime
+
+
 class AgentChatMessage(BaseModel):
     role: Literal["banker", "agent"]
     content: str
@@ -128,6 +184,10 @@ class CreditRequest(BaseModel):
     auto_decision: Optional[str] = None
     auto_decision_confidence: Optional[float] = None
     auto_review_required: Optional[bool] = None
+    loan: Optional[LoanInfo] = None
+    installments: List[InstallmentInfo] = Field(default_factory=list)
+    payments: List[PaymentInfo] = Field(default_factory=list)
+    payment_behavior_summary: Optional[PaymentBehaviorSummary] = None
 
 
 class BankerRequest(BaseModel):
@@ -157,3 +217,7 @@ class BankerRequest(BaseModel):
     auto_decision: Optional[str] = None
     auto_decision_confidence: Optional[float] = None
     auto_review_required: Optional[bool] = None
+    loan: Optional[LoanInfo] = None
+    installments: List[InstallmentInfo] = Field(default_factory=list)
+    payments: List[PaymentInfo] = Field(default_factory=list)
+    payment_behavior_summary: Optional[PaymentBehaviorSummary] = None

@@ -41,6 +41,102 @@ OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1")
 LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
 
 
+def _extract_payment_summary(request_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    summary = request_data.get("payment_behavior_summary")
+    if isinstance(summary, dict):
+        return summary
+    payment_history = request_data.get("payment_history")
+    if isinstance(payment_history, dict):
+        nested = payment_history.get("payment_behavior_summary")
+        if isinstance(nested, dict):
+            return nested
+    return None
+
+
+def _classify_payment_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        on_time_rate = float(summary.get("on_time_rate") or 0)
+    except (TypeError, ValueError):
+        on_time_rate = 0.0
+    try:
+        missed = int(summary.get("missed_installments") or 0)
+    except (TypeError, ValueError):
+        missed = 0
+    try:
+        max_late = int(summary.get("max_days_late") or 0)
+    except (TypeError, ValueError):
+        max_late = 0
+    try:
+        total_installments = int(summary.get("total_installments") or 0)
+    except (TypeError, ValueError):
+        total_installments = 0
+
+    if total_installments == 0:
+        return {
+            "label": "unknown",
+            "note": "Historique de paiement insuffisant",
+            "risk_delta": 0.0,
+            "strengths": [],
+            "weaknesses": ["Historique de paiement insuffisant"],
+            "red_flags": [],
+        }
+
+    if on_time_rate >= 0.95 and missed == 0 and max_late <= 3:
+        return {
+            "label": "good",
+            "note": "Profil proche des clients qui paient toujours a temps",
+            "risk_delta": -0.08,
+            "strengths": ["Historique de paiement excellent"],
+            "weaknesses": [],
+            "red_flags": [],
+        }
+    if on_time_rate >= 0.85 and missed <= 1 and max_late <= 15:
+        return {
+            "label": "moderate",
+            "note": "Profil proche des clients globalement fiables avec quelques retards",
+            "risk_delta": -0.02,
+            "strengths": ["Historique de paiement globalement fiable"],
+            "weaknesses": ["Quelques retards observes"],
+            "red_flags": [],
+        }
+    return {
+        "label": "bad",
+        "note": "Profil proche des clients avec retards frequents ou impayes",
+        "risk_delta": 0.12,
+        "strengths": [],
+        "weaknesses": ["Retards ou impayes recurrents"],
+        "red_flags": ["PAYMENT_HISTORY_WEAK"],
+    }
+
+
+def _format_payment_summary_for_prompt(summary: Optional[Dict[str, Any]]) -> str:
+    if not isinstance(summary, dict):
+        return ""
+    try:
+        on_time_rate = float(summary.get("on_time_rate") or 0)
+    except (TypeError, ValueError):
+        on_time_rate = 0.0
+    try:
+        avg_days_late = float(summary.get("avg_days_late") or 0)
+    except (TypeError, ValueError):
+        avg_days_late = 0.0
+    try:
+        max_days_late = int(summary.get("max_days_late") or 0)
+    except (TypeError, ValueError):
+        max_days_late = 0
+    try:
+        missed = int(summary.get("missed_installments") or 0)
+    except (TypeError, ValueError):
+        missed = 0
+    return (
+        "\n## HISTORIQUE DE PAIEMENT:\n"
+        f"- Taux a l'heure: {round(on_time_rate * 100)}%\n"
+        f"- Retard moyen: {round(avg_days_late, 1)} jours\n"
+        f"- Retard max: {max_days_late} jours\n"
+        f"- Tranches manquees: {missed}\n"
+    )
+
+
 # ==============================================================================
 # PROMPTS
 # ==============================================================================
@@ -448,6 +544,50 @@ class SimilarityAgentAI:
             "summary": "Revision manuelle requise - systeme AI non disponible."
         }
 
+    def _apply_payment_assessment(self, ai_analysis: Dict[str, Any], assessment: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(ai_analysis, dict):
+            return ai_analysis
+        risk_score = ai_analysis.get("risk_score", 0.5)
+        try:
+            risk_score = float(risk_score)
+        except (TypeError, ValueError):
+            risk_score = 0.5
+        risk_score = max(0.0, min(1.0, risk_score + float(assessment.get("risk_delta", 0.0))))
+        ai_analysis["risk_score"] = round(risk_score, 4)
+
+        if risk_score >= 0.7:
+            ai_analysis["risk_level"] = "eleve"
+        elif risk_score >= 0.4:
+            ai_analysis["risk_level"] = "modere"
+        else:
+            ai_analysis["risk_level"] = "faible"
+
+        points_forts = ai_analysis.get("points_forts") or []
+        if not isinstance(points_forts, list):
+            points_forts = [str(points_forts)]
+        points_faibles = ai_analysis.get("points_faibles") or []
+        if not isinstance(points_faibles, list):
+            points_faibles = [str(points_faibles)]
+        red_flags = ai_analysis.get("red_flags") or []
+        if not isinstance(red_flags, list):
+            red_flags = [str(red_flags)]
+
+        if assessment.get("strengths"):
+            points_forts = list(points_forts) + assessment.get("strengths", [])
+        if assessment.get("weaknesses"):
+            points_faibles = list(points_faibles) + assessment.get("weaknesses", [])
+        if assessment.get("red_flags"):
+            red_flags = list(red_flags) + assessment.get("red_flags", [])
+
+        ai_analysis["points_forts"] = points_forts
+        ai_analysis["points_faibles"] = points_faibles
+        ai_analysis["red_flags"] = red_flags
+        ai_analysis["payment_history_assessment"] = {
+            "label": assessment.get("label"),
+            "note": assessment.get("note"),
+        }
+        return ai_analysis
+
     # --------------------------------------------------------------------------
     # LANGGRAPH NODES
     # --------------------------------------------------------------------------
@@ -603,13 +743,21 @@ class SimilarityAgentAI:
         
         if not self.llm_enabled:
             print("   LLM non disponible, utilisation de l'analyse de secours")
-            return {"ai_analysis": self._fallback_analysis()}
+            ai_analysis = self._fallback_analysis()
+            payment_summary = _extract_payment_summary(state.get("request_data", {}))
+            if payment_summary:
+                assessment = _classify_payment_summary(payment_summary)
+                ai_analysis = self._apply_payment_assessment(ai_analysis, assessment)
+            return {"ai_analysis": ai_analysis}
             
         profile_dict = state["profile_dict"]
         similar_cases = state["similar_cases"]
         stats = state["stats"]
         
         prompt_content = self._build_prompt_content(profile_dict, similar_cases, stats)
+        payment_summary = _extract_payment_summary(state.get("request_data", {}))
+        if payment_summary:
+            prompt_content += _format_payment_summary_for_prompt(payment_summary)
         
         try:
             # Appel LangChain ChatOpenAI
@@ -620,11 +768,20 @@ class SimilarityAgentAI:
             response = self.llm.invoke(messages)
             ai_analysis = json.loads(response.content)
             print("   Analyse LLM terminee")
+            payment_summary = _extract_payment_summary(state.get("request_data", {}))
+            if payment_summary:
+                assessment = _classify_payment_summary(payment_summary)
+                ai_analysis = self._apply_payment_assessment(ai_analysis, assessment)
             return {"ai_analysis": ai_analysis}
             
         except Exception as e:
             print("Erreur LLM: " + str(e))
-            return {"ai_analysis": self._fallback_analysis()}
+            ai_analysis = self._fallback_analysis()
+            payment_summary = _extract_payment_summary(state.get("request_data", {}))
+            if payment_summary:
+                assessment = _classify_payment_summary(payment_summary)
+                ai_analysis = self._apply_payment_assessment(ai_analysis, assessment)
+            return {"ai_analysis": ai_analysis}
 
     def node_format_output(self, state: AgentState) -> Dict:
         """Etape Finale: Construction de la reponse"""

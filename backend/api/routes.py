@@ -25,6 +25,10 @@ from api.schemas import (
     AgentChatRequest,
     AgentChatResponse,
     AgentChatMessage,
+    LoanInfo,
+    InstallmentInfo,
+    PaymentInfo,
+    PaymentBehaviorSummary,
 )
 from api.deps import get_current_user
 from core.orchestrator import run_orchestrator
@@ -219,6 +223,80 @@ def _map_comments(comment_rows: List[Dict[str, Any]]) -> List[Comment]:
     ]
 
 
+def _map_loan(loan_row: Optional[Dict[str, Any]]) -> Optional[LoanInfo]:
+    if not loan_row:
+        return None
+    return LoanInfo(
+        loan_id=int(loan_row["loan_id"]),
+        user_id=int(loan_row["user_id"]),
+        case_id=loan_row.get("case_id"),
+        principal_amount=float(loan_row["principal_amount"]),
+        interest_rate=float(loan_row["interest_rate"]),
+        term_months=int(loan_row["term_months"]),
+        status=str(loan_row["status"]),
+        approved_at=loan_row.get("approved_at"),
+        start_date=loan_row.get("start_date"),
+        end_date=loan_row.get("end_date"),
+        created_at=loan_row.get("created_at"),
+    )
+
+
+def _map_installments(rows: List[Dict[str, Any]]) -> List[InstallmentInfo]:
+    return [
+        InstallmentInfo(
+            installment_id=int(row["installment_id"]),
+            loan_id=int(row["loan_id"]),
+            installment_number=int(row["installment_number"]),
+            due_date=row["due_date"],
+            amount_due=float(row["amount_due"]),
+            status=str(row["status"]),
+            amount_paid=float(row.get("amount_paid") or 0),
+            paid_at=row.get("paid_at"),
+            days_late=row.get("days_late"),
+            created_at=row.get("created_at"),
+        )
+        for row in rows
+    ]
+
+
+def _map_payments(rows: List[Dict[str, Any]]) -> List[PaymentInfo]:
+    return [
+        PaymentInfo(
+            payment_id=int(row["payment_id"]),
+            loan_id=int(row["loan_id"]),
+            installment_id=row.get("installment_id"),
+            payment_date=row["payment_date"],
+            amount=float(row["amount"]),
+            channel=str(row["channel"]),
+            status=str(row["status"]),
+            is_reversal=bool(row.get("is_reversal")),
+            reversal_of=row.get("reversal_of"),
+            created_at=row.get("created_at"),
+        )
+        for row in rows
+    ]
+
+
+def _map_payment_summary(row: Optional[Dict[str, Any]]) -> Optional[PaymentBehaviorSummary]:
+    if not row:
+        return None
+    return PaymentBehaviorSummary(
+        summary_id=int(row["summary_id"]),
+        user_id=int(row["user_id"]),
+        total_loans=int(row.get("total_loans") or 0),
+        total_installments=int(row.get("total_installments") or 0),
+        on_time_installments=int(row.get("on_time_installments") or 0),
+        late_installments=int(row.get("late_installments") or 0),
+        missed_installments=int(row.get("missed_installments") or 0),
+        on_time_rate=float(row.get("on_time_rate") or 0),
+        avg_days_late=float(row.get("avg_days_late") or 0),
+        max_days_late=int(row.get("max_days_late") or 0),
+        avg_payment_amount=float(row.get("avg_payment_amount") or 0),
+        last_payment_date=row.get("last_payment_date"),
+        updated_at=row.get("updated_at"),
+    )
+
+
 def _build_agents_raw(detail: Dict[str, Any]) -> Dict[str, Any]:
     mapping = {
         "document": "document_agent",
@@ -338,6 +416,10 @@ def _build_banker_request(detail: Dict[str, Any]) -> BankerRequest:
         agents=_map_agent_outputs(detail.get("agent_outputs", [])),
         comments=_map_comments(detail.get("comments", [])),
         decision=_map_decision(detail.get("decision")),
+        loan=_map_loan(detail.get("loan")),
+        installments=_map_installments(detail.get("installments", [])),
+        payments=_map_payments(detail.get("payments", [])),
+        payment_behavior_summary=_map_payment_summary(detail.get("payment_behavior_summary")),
     )
 
 
@@ -377,7 +459,7 @@ def create_credit_request(body: CreditRequestCreate, user=Depends(get_current_us
 
     created = create_credit_request_db(user["user_id"], payload_data, None)
     case_id = int(created["case_id"])
-    orchestration = run_orchestrator({**payload_data, "case_id": case_id})
+    orchestration = run_orchestrator({**payload_data, "case_id": case_id, "user_id": user["user_id"]})
     save_orchestration(case_id, orchestration)
     banker_detail = fetch_case_detail(case_id)
     if banker_detail:
@@ -400,6 +482,10 @@ def create_credit_request(body: CreditRequestCreate, user=Depends(get_current_us
         auto_decision=detail.get("auto_decision"),
         auto_decision_confidence=float(detail["auto_decision_confidence"]) if detail.get("auto_decision_confidence") is not None else None,
         auto_review_required=detail.get("auto_review_required"),
+        loan=_map_loan(detail.get("loan")),
+        installments=_map_installments(detail.get("installments", [])),
+        payments=_map_payments(detail.get("payments", [])),
+        payment_behavior_summary=_map_payment_summary(detail.get("payment_behavior_summary")),
     )
 
 
@@ -435,7 +521,7 @@ async def create_credit_request_upload(
             "documents_payloads": documents_payloads,
             "documents": [doc.get("filename") for doc in stored_documents],
         }
-    orchestration = run_orchestrator({**payload_data, "case_id": case_id})
+    orchestration = run_orchestrator({**payload_data, "case_id": case_id, "user_id": user["user_id"]})
     save_orchestration(case_id, orchestration)
     banker_detail = fetch_case_detail(case_id)
     if banker_detail:
@@ -459,6 +545,10 @@ async def create_credit_request_upload(
         auto_decision=detail.get("auto_decision"),
         auto_decision_confidence=float(detail["auto_decision_confidence"]) if detail.get("auto_decision_confidence") is not None else None,
         auto_review_required=detail.get("auto_review_required"),
+        loan=_map_loan(detail.get("loan")),
+        installments=_map_installments(detail.get("installments", [])),
+        payments=_map_payments(detail.get("payments", [])),
+        payment_behavior_summary=_map_payment_summary(detail.get("payment_behavior_summary")),
     )
 
 
@@ -482,6 +572,10 @@ def get_credit_request(req_id: str, user=Depends(get_current_user)):
         auto_decision=detail.get("auto_decision"),
         auto_decision_confidence=float(detail["auto_decision_confidence"]) if detail.get("auto_decision_confidence") is not None else None,
         auto_review_required=detail.get("auto_review_required"),
+        loan=_map_loan(detail.get("loan")),
+        installments=_map_installments(detail.get("installments", [])),
+        payments=_map_payments(detail.get("payments", [])),
+        payment_behavior_summary=_map_payment_summary(detail.get("payment_behavior_summary")),
     )
 
 
@@ -508,6 +602,10 @@ def list_client_requests(user=Depends(get_current_user)):
                 auto_decision=detail.get("auto_decision"),
                 auto_decision_confidence=float(detail["auto_decision_confidence"]) if detail.get("auto_decision_confidence") is not None else None,
                 auto_review_required=detail.get("auto_review_required"),
+                loan=_map_loan(detail.get("loan")),
+                installments=_map_installments(detail.get("installments", [])),
+                payments=_map_payments(detail.get("payments", [])),
+                payment_behavior_summary=_map_payment_summary(detail.get("payment_behavior_summary")),
             )
         )
     return results

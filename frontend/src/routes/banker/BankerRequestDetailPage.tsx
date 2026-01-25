@@ -4,6 +4,7 @@ import { http } from "../../api/http";
 import { AgentPanel } from "../../components/agents/AgentPanel";
 import { AgentChatPanel } from "../../components/agents/AgentChatPanel";
 import { BankerRequest, DecisionCreate } from "../../api/types";
+import { formatCurrency, formatDate, formatDateTime, formatPercent, statusBadgeStyle, statusLabel } from "../../utils/format";
 
 const AGENTS = ["document", "behavior", "similarity", "image", "fraud"];
 
@@ -20,11 +21,13 @@ export const BankerRequestDetailPage = () => {
   const [uploadFiles, setUploadFiles] = useState<File[]>([]);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<string | null>(null);
 
   const load = async () => {
     try {
       const res = await http.get<BankerRequest>(`/banker/credit-requests/${id}`);
       setData(res);
+      setLastUpdated(new Date().toISOString());
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -34,6 +37,11 @@ export const BankerRequestDetailPage = () => {
 
   useEffect(() => {
     if (id) load();
+    const onFocus = () => {
+      if (id) load();
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
   }, [id]);
 
   const submitDecision = async (e: FormEvent) => {
@@ -105,11 +113,29 @@ export const BankerRequestDetailPage = () => {
     )
   );
 
+  const refresh = () => {
+    setLoading(true);
+    load();
+  };
+
+  const installments = data.installments || [];
+  const payments = data.payments || [];
+  const paymentSummary = data.payment_behavior_summary;
+
   return (
     <div className="grid" style={{ gap: 12 }}>
       <div>
         <button className="button-ghost" type="button" onClick={() => navigate("/banker/requests")}>
           Retour à la liste
+        </button>
+      </div>
+      <div className="card" style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
+        <strong>Synchronisation</strong>
+        <span style={{ color: "#475569" }}>
+          {lastUpdated ? `Dernière mise à jour: ${formatDateTime(lastUpdated)}` : "Dernière mise à jour: —"}
+        </span>
+        <button className="button-ghost" type="button" onClick={refresh} disabled={loading}>
+          {loading ? "Mise à jour..." : "Rafraîchir"}
         </button>
       </div>
       <div className="card">
@@ -131,7 +157,9 @@ export const BankerRequestDetailPage = () => {
       </div>
       <div className="card">
         <h2>Détail de la demande</h2>
-        <div className="badge">{data.status}</div>
+        <div className="badge" style={statusBadgeStyle(data.status)}>
+          {statusLabel(data.status)}
+        </div>
         <p style={{ color: "#475569", marginTop: 8 }}>
           Client {data.client_id} • {data.amount} € • {data.duration_months} mois
         </p>
@@ -193,6 +221,75 @@ export const BankerRequestDetailPage = () => {
           {uploadError && <div style={{ color: "#b91c1c", fontSize: 14 }}>{uploadError}</div>}
         </div>
       </div>
+
+      {data.loan && (
+        <div className="card">
+          <h3>Prêt réel</h3>
+          <div style={{ display: "grid", gap: 6, color: "#475569" }}>
+            <div>Montant: {formatCurrency(data.loan.principal_amount)} €</div>
+            <div>Taux: {(data.loan.interest_rate * 100).toFixed(2)}%</div>
+            <div>Durée: {data.loan.term_months} mois</div>
+            <div>Statut: {data.loan.status}</div>
+            <div>Début: {formatDate(data.loan.start_date)}</div>
+            <div>Fin: {formatDate(data.loan.end_date)}</div>
+          </div>
+        </div>
+      )}
+
+      {paymentSummary && (
+        <div className="card">
+          <h3>Résumé comportement de paiement</h3>
+          <div style={{ display: "grid", gap: 6, color: "#475569" }}>
+            <div>Taux à l'heure: {formatPercent(paymentSummary.on_time_rate)}</div>
+            <div>Retard moyen: {paymentSummary.avg_days_late?.toFixed(1)} jours</div>
+            <div>Retard max: {paymentSummary.max_days_late} jours</div>
+            <div>Tranches manquées: {paymentSummary.missed_installments}</div>
+            <div>Dernier paiement: {formatDate(paymentSummary.last_payment_date)}</div>
+          </div>
+        </div>
+      )}
+
+      {installments.length > 0 && (
+        <div className="card">
+          <h3>Tranches de paiement</h3>
+          <ul style={{ paddingLeft: 16, color: "#475569" }}>
+            {installments.slice(0, 12).map((inst) => (
+              <li key={inst.installment_id}>
+                #{inst.installment_number} • {formatDate(inst.due_date)} • {formatCurrency(inst.amount_due)} € •{" "}
+                {inst.status}
+                {typeof inst.days_late === "number" && inst.days_late > 0
+                  ? ` (retard ${inst.days_late}j)`
+                  : ""}
+                {inst.amount_paid ? ` • payé ${formatCurrency(inst.amount_paid)} €` : ""}
+              </li>
+            ))}
+          </ul>
+          {installments.length > 12 && (
+            <p style={{ color: "#64748b", marginTop: 8 }}>
+              {installments.length - 12} tranches supplémentaires…
+            </p>
+          )}
+        </div>
+      )}
+
+      {payments.length > 0 && (
+        <div className="card">
+          <h3>Paiements réels</h3>
+          <ul style={{ paddingLeft: 16, color: "#475569" }}>
+            {payments.slice(0, 12).map((pay) => (
+              <li key={pay.payment_id}>
+                {formatDate(pay.payment_date)} • {formatCurrency(pay.amount)} € • {pay.channel} • {pay.status}
+                {pay.is_reversal ? " (reversal)" : ""}
+              </li>
+            ))}
+          </ul>
+          {payments.length > 12 && (
+            <p style={{ color: "#64748b", marginTop: 8 }}>
+              {payments.length - 12} paiements supplémentaires…
+            </p>
+          )}
+        </div>
+      )}
 
       <div className="card">
         <h3>Analyse globale</h3>

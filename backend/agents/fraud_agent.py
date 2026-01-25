@@ -39,6 +39,91 @@ def _safe_list(val: Any) -> List[Any]:
     return val if isinstance(val, list) else []
 
 
+def _extract_json_text(raw: Optional[str]) -> Optional[str]:
+    if not raw:
+        return None
+    cleaned = raw.replace("```json", "```").replace("```", "").strip()
+    if cleaned.startswith("{") and cleaned.endswith("}"):
+        return cleaned
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return cleaned[start : end + 1]
+    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+    if match:
+        return match.group(0)
+    return None
+
+
+def _parse_llm_json(raw: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not raw:
+        return None
+    import json
+
+    json_text = _extract_json_text(raw)
+    if not json_text:
+        return None
+    try:
+        parsed = json.loads(json_text)
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _flags_from_payment_history(payment_history: Dict[str, Any]) -> List[str]:
+    flags: List[str] = []
+    if not isinstance(payment_history, dict):
+        return flags
+    payments = payment_history.get("payments") or []
+    installments = payment_history.get("installments") or []
+
+    for p in payments:
+        status = str(p.get("status", "")).upper()
+        amount = p.get("amount")
+        if status == "REVERSED" or p.get("is_reversal"):
+            flags.append("PAYMENT_REVERSAL")
+        try:
+            if amount is not None and float(amount) <= 0:
+                flags.append("NEGATIVE_PAYMENT")
+        except (TypeError, ValueError):
+            pass
+
+    if payments:
+        try:
+            sorted_dates = [p.get("payment_date") for p in payments if p.get("payment_date")]
+            if sorted_dates != sorted(sorted_dates):
+                flags.append("BACKDATED_PAYMENTS")
+        except Exception:
+            pass
+
+    if installments:
+        for inst in installments:
+            status = str(inst.get("status", "")).upper()
+            try:
+                amount_due = float(inst.get("amount_due") or 0)
+                amount_paid = float(inst.get("amount_paid") or 0)
+            except (TypeError, ValueError):
+                continue
+            if status == "PAID" and amount_due > 0 and amount_paid < amount_due * 0.8:
+                flags.append("INSTALLMENT_STATUS_MISMATCH")
+
+    try:
+        total_paid = sum(float(p.get("amount") or 0) for p in payments if str(p.get("status", "")).upper() == "COMPLETED")
+        total_due = sum(float(i.get("amount_due") or 0) for i in installments)
+        if total_due > 0 and total_paid > total_due * 1.5:
+            flags.append("OVERPAYMENT_ANOMALY")
+    except (TypeError, ValueError):
+        pass
+
+    seen = set()
+    deduped: List[str] = []
+    for f in flags:
+        if f not in seen:
+            deduped.append(f)
+            seen.add(f)
+    return deduped
+
+
 def _regex_flags_from_text(texts: List[str]) -> List[str]:
     flags: List[str] = []
     patterns = {
@@ -71,8 +156,11 @@ def _aggregate_signals(payload: Dict[str, Any]) -> Tuple[List[str], List[str]]:
     img_flags = _safe_list(payload.get("image_flags"))
     sim_flags = _safe_list(payload.get("similarity_flags"))
 
-    supporting.extend(doc_flags + beh_flags + txn_flags + img_flags + sim_flags)
-    detected.extend(doc_flags + txn_flags + img_flags + sim_flags)
+    payment_history = payload.get("payment_history") or {}
+    payment_flags = _flags_from_payment_history(payment_history) if payment_history else []
+
+    supporting.extend(doc_flags + beh_flags + txn_flags + img_flags + sim_flags + payment_flags)
+    detected.extend(doc_flags + txn_flags + img_flags + sim_flags + payment_flags)
 
     # Dedup
     def dedup(items: List[str]) -> List[str]:
@@ -106,6 +194,11 @@ def _score_risk(detected_flags: List[str], supporting_signals: List[str]) -> Tup
         "INCOME_MISMATCH": 0.2,
         "HIGH_RISK_PATTERN": 0.35,
         "MULTIPLE_LOGIN_LOCATIONS": 0.2,
+        "PAYMENT_REVERSAL": 0.3,
+        "NEGATIVE_PAYMENT": 0.25,
+        "BACKDATED_PAYMENTS": 0.2,
+        "OVERPAYMENT_ANOMALY": 0.2,
+        "INSTALLMENT_STATUS_MISMATCH": 0.2,
     }
     score = 0.1  # base
     for flag in detected_flags:
@@ -148,13 +241,9 @@ Reponds en JSON: {{"flag_explanations": {{"FLAG": "..."}}, "global_summary": "..
             except Exception:
                 content = None
         if content:
-            import json
-            try:
-                parsed = json.loads(content)
-                if isinstance(parsed, dict) and "flag_explanations" in parsed:
-                    return parsed
-            except Exception:
-                pass
+            parsed = _parse_llm_json(content)
+            if isinstance(parsed, dict) and "flag_explanations" in parsed:
+                return parsed
     # Fallback deterministic explanations
     default_map = {
         "SUSPICIOUS_AMOUNT": "Transaction inhabituelle depassant le seuil defini.",
@@ -162,6 +251,11 @@ Reponds en JSON: {{"flag_explanations": {{"FLAG": "..."}}, "global_summary": "..
         "INCOME_MISMATCH": "Les revenus declares different des documents fournis.",
         "HIGH_RISK_PATTERN": "Pattern historique associe a des cas de fraude.",
         "MULTIPLE_LOGIN_LOCATIONS": "Connexions multiples depuis des localisations distantes.",
+        "PAYMENT_REVERSAL": "Paiement annule ou reverse detecte.",
+        "NEGATIVE_PAYMENT": "Montant de paiement invalide ou negatif.",
+        "BACKDATED_PAYMENTS": "Dates de paiement incoherentes ou en arriere.",
+        "OVERPAYMENT_ANOMALY": "Montants payes superieurs au total attendu.",
+        "INSTALLMENT_STATUS_MISMATCH": "Statut des tranches incoherent avec les montants payes.",
     }
     flag_expl = {f: default_map.get(f, "Signal de fraude a examiner.") for f in flags}
     summary = "Plusieurs signaux de fraude detectes, revue manuelle requise." if flags else "Peu de signaux de fraude identifies."

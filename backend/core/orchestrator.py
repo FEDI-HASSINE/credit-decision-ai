@@ -1,5 +1,7 @@
 from typing import Any, Dict, List, Optional
 
+from core.db import fetch_payment_context
+
 try:
     from agents.document_agent import analyze_documents  # type: ignore
 except Exception:  # pragma: no cover - fallback
@@ -224,6 +226,21 @@ def _derive_reason_codes(
     if fraud_level == "HIGH":
         reason_codes.append("DOC_INCONSISTENCY")
 
+    payment_summary = request_data.get("payment_behavior_summary")
+    if not payment_summary and request_data.get("payment_history"):
+        payment_summary = (request_data.get("payment_history") or {}).get("payment_behavior_summary")
+    if isinstance(payment_summary, dict):
+        try:
+            on_time_rate = float(payment_summary.get("on_time_rate") or 0)
+        except (TypeError, ValueError):
+            on_time_rate = 0.0
+        missed = int(payment_summary.get("missed_installments") or 0)
+        max_late = int(payment_summary.get("max_days_late") or 0)
+        if on_time_rate >= 0.95 and missed == 0 and max_late <= 3:
+            reason_codes.append("PAYMENT_HISTORY_GOOD")
+        elif on_time_rate <= 0.8 or missed >= 2 or max_late >= 30:
+            reason_codes.append("PAYMENT_HISTORY_POOR")
+
     image_flags = []
     if image_result:
         image_flags = image_result.get("image_analysis", {}).get("flags", []) or image_result.get("image_flags", [])
@@ -369,10 +386,25 @@ def run_orchestrator(request_data: Dict[str, Any]) -> Dict[str, Any]:
     """Execute agents, aggregate outputs, and produce an explanation-ready payload."""
 
     case_id = request_data.get("case_id") or request_data.get("request_id") or "unknown"
+    user_id = request_data.get("user_id")
+
+    payment_context = request_data.get("payment_history")
+    if not payment_context and user_id:
+        try:
+            payment_context = fetch_payment_context(int(user_id), int(case_id) if str(case_id).isdigit() else None)
+        except Exception:
+            payment_context = None
+    if payment_context:
+        request_data = {**request_data, "payment_history": payment_context}
 
     documents_payload = _build_documents_payload(request_data)
     declared_profile = request_data.get("declared_profile") or _build_declared_profile(request_data)
     telemetry = request_data.get("telemetry") or {}
+    payment_summary = request_data.get("payment_behavior_summary")
+    if not payment_summary and payment_context:
+        payment_summary = payment_context.get("payment_behavior_summary")
+    if payment_summary:
+        request_data = {**request_data, "payment_behavior_summary": payment_summary}
 
     doc_request = {
         "case_id": case_id,
@@ -390,7 +422,12 @@ def run_orchestrator(request_data: Dict[str, Any]) -> Dict[str, Any]:
 
     if analyze_behavior:
         try:
-            behavior_result = analyze_behavior({"case_id": case_id, "telemetry": telemetry})
+            behavior_result = analyze_behavior({
+                "case_id": case_id,
+                "telemetry": telemetry,
+                "payment_behavior_summary": payment_summary,
+                "payment_history": payment_context,
+            })
         except Exception:
             behavior_result = {"case_id": case_id, "behavior_analysis": {}, "confidence": 0.4}
     else:
@@ -398,7 +435,7 @@ def run_orchestrator(request_data: Dict[str, Any]) -> Dict[str, Any]:
 
     if analyze_similarity:
         try:
-            sim_result = analyze_similarity(_build_similarity_payload(request_data))
+            sim_result = analyze_similarity({**_build_similarity_payload(request_data), "payment_behavior_summary": payment_summary})
         except Exception:
             sim_result = {"case_id": case_id, "ai_analysis": {}, "rag_statistics": {}, "confidence": 0.3}
     else:
@@ -441,6 +478,7 @@ def run_orchestrator(request_data: Dict[str, Any]) -> Dict[str, Any]:
         "image_flags": image_flags,
         "similarity_flags": similarity_flags,
         "free_text": _safe_list(request_data.get("free_text", [])),
+        "payment_history": payment_context,
     }
 
     if analyze_fraud:
@@ -493,6 +531,7 @@ def run_orchestrator(request_data: Dict[str, Any]) -> Dict[str, Any]:
                 behavior_result=behavior_result,
                 fraud_result=fraud_result,
                 image_result=image_result,
+                payment_behavior_summary=payment_summary,
             )
         except Exception:
             explanation_result = {"case_id": case_id, "explanation": {}, "explanation_confidence": 0.3}

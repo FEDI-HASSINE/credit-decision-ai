@@ -1,11 +1,14 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { http } from "../../api/http";
 import { BankerRequest } from "../../api/types";
+import { formatDateTime, statusBadgeStyle, statusLabel } from "../../utils/format";
 
 const RequestsSection = ({ title, items }: { title: string; items: BankerRequest[] }) => (
   <div className="card">
-    <h2>{title}</h2>
+    <h2>
+      {title} <span style={{ color: "#64748b", fontSize: 14 }}>({items.length})</span>
+    </h2>
     {items.length === 0 ? (
       <p style={{ color: "#475569" }}>Aucune demande.</p>
     ) : (
@@ -16,14 +19,16 @@ const RequestsSection = ({ title, items }: { title: string; items: BankerRequest
               <div>
                 <strong>Demande #{req.id}</strong>
                 <div style={{ color: "#475569", fontSize: 14 }}>
-                  Client {req.client_id} • {req.amount} € • {req.duration_months} mois
+                  Client {req.client_id} • {req.amount ?? "-"} € • {req.duration_months ?? "-"} mois
                 </div>
               </div>
-              <span className="badge">{req.status}</span>
+              <span className="badge" style={statusBadgeStyle(req.status)}>
+                {statusLabel(req.status)}
+              </span>
             </div>
             <div style={{ marginTop: 8, display: "flex", justifyContent: "space-between" }}>
               <span style={{ color: "#475569" }}>
-                Créée le {new Date(req.created_at).toLocaleString()}
+                Créée le {formatDateTime(req.created_at)}
               </span>
               <Link className="button-ghost" to={`/banker/requests/${req.id}`}>
                 Voir détail
@@ -37,23 +42,21 @@ const RequestsSection = ({ title, items }: { title: string; items: BankerRequest
 );
 
 export const BankerRequestsPage = () => {
-  const [pending, setPending] = useState<BankerRequest[]>([]);
-  const [decided, setDecided] = useState<BankerRequest[]>([]);
+  const [items, setItems] = useState<BankerRequest[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const location = useLocation();
+  const [since, setSince] = useState<string | null>(() => localStorage.getItem("bankerRequestsSince"));
+  const [lastUpdated, setLastUpdated] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
     const load = async () => {
       try {
-        const [pendingRes, decidedRes] = await Promise.all([
-          http.get<BankerRequest[]>("/banker/credit-requests?status=pending"),
-          http.get<BankerRequest[]>("/banker/credit-requests?status=decided"),
-        ]);
+        const all = await http.get<BankerRequest[]>("/banker/credit-requests");
         if (!active) return;
-        setPending(pendingRes);
-        setDecided(decidedRes);
+        setItems(all);
+        setLastUpdated(new Date().toISOString());
       } catch (err) {
         if (!active) return;
         setError((err as Error).message);
@@ -61,9 +64,12 @@ export const BankerRequestsPage = () => {
     };
     load();
     const interval = setInterval(load, 15000);
+    const onFocus = () => load();
+    window.addEventListener("focus", onFocus);
     return () => {
       active = false;
       clearInterval(interval);
+      window.removeEventListener("focus", onFocus);
     };
   }, []);
 
@@ -78,6 +84,32 @@ export const BankerRequestsPage = () => {
 
   if (error) return <div className="card">Erreur: {error}</div>;
 
+  const { pending, decided } = useMemo(() => {
+    const fromTs = since ? new Date(since).getTime() : null;
+    const filtered = fromTs
+      ? items.filter((req) => new Date(req.created_at).getTime() >= fromTs)
+      : items;
+    const nonTreated = filtered.filter((req) => req.status === "pending" || req.status === "in_review");
+    const treated = filtered.filter((req) => req.status === "approved" || req.status === "rejected");
+    const sortByDate = (a: BankerRequest, b: BankerRequest) =>
+      new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
+    return {
+      pending: nonTreated.sort(sortByDate),
+      decided: treated.sort(sortByDate),
+    };
+  }, [items, since]);
+
+  const resetToNow = () => {
+    const now = new Date().toISOString();
+    localStorage.setItem("bankerRequestsSince", now);
+    setSince(now);
+  };
+
+  const clearFilter = () => {
+    localStorage.removeItem("bankerRequestsSince");
+    setSince(null);
+  };
+
   return (
     <div className="grid" style={{ gap: 16 }}>
       {toast && (
@@ -85,7 +117,24 @@ export const BankerRequestsPage = () => {
           {toast}
         </div>
       )}
-      <RequestsSection title="Demandes à traiter" items={pending} />
+      <div className="card" style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
+        <strong>Filtre des dossiers</strong>
+        <span style={{ color: "#475569" }}>
+          {since ? `Depuis le ${new Date(since).toLocaleString()}` : "Tous les dossiers"}
+        </span>
+        <span style={{ color: "#94a3b8" }}>
+          {lastUpdated ? `Sync: ${formatDateTime(lastUpdated)}` : "Sync: —"}
+        </span>
+        <button className="button-ghost" type="button" onClick={resetToNow}>
+          Réinitialiser à maintenant
+        </button>
+        {since && (
+          <button className="button-ghost" type="button" onClick={clearFilter}>
+            Afficher tous
+          </button>
+        )}
+      </div>
+      <RequestsSection title="Demandes non traitées" items={pending} />
       <RequestsSection title="Demandes traitées" items={decided} />
     </div>
   );

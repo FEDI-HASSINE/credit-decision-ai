@@ -274,6 +274,13 @@ class OrchestratorAgent:
             aggregated["behavior_flags"] = behavior_data.get("behavior_flags", [])
             aggregated["scores"]["behavior_risk"] = behavior_data.get("brs_score", 0.0)
             aggregated["risk_levels"]["behavior"] = behavior_data.get("behavior_level", "UNKNOWN")
+            payment_summary = behavior_data.get("payment_behavior_summary")
+            if payment_summary:
+                aggregated["payment_summary"] = payment_summary
+                try:
+                    aggregated["scores"]["payment_on_time_rate"] = float(payment_summary.get("on_time_rate") or 0)
+                except (TypeError, ValueError):
+                    aggregated["scores"]["payment_on_time_rate"] = 0.0
         
         # Similarity agent
         sim_output = outputs.get("similarity_agent")
