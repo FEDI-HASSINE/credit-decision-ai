@@ -1,192 +1,163 @@
 # Credit Decision AI
 
-Assistant de décision crédit orienté multi‑agents. Le backend orchestre plusieurs agents (documents, comportement, similarité, fraude, image, explication), agrège leurs signaux et stocke les résultats dans PostgreSQL. Le frontend fournit un espace client + banquier pour piloter le dossier et garder l’humain dans la boucle.
+AI-assisted credit decision support with multi-agent analysis and human-in-the-loop review.
 
-## Objectif
-Aider les analystes crédit avec des signaux structurés et explicables, sans automatiser la décision finale. La fraude est un signal parmi d’autres. La recommandation peut être rejouée, mais la décision finale appartient au banquier.
+---
 
-## Architecture (flux simplifié)
-1. **Client** soumet une demande via `/api/client/credit-requests`.
-2. **Orchestrateur** (`backend/core/orchestrator.py`) exécute les agents et produit :
-   - un payload de décision (recommandation + raisons)
-   - un bundle d’agents normalisé
-   - un résumé lisible
-3. **Persistence** : résultats enregistrés en base (`agent_outputs`, `credit_cases`, etc.).
-4. **Banquier** consulte, discute avec un agent, commente, et enregistre la décision finale.
+## Project Overview
 
-## Stack
-- **Backend** : FastAPI, LangChain/LangGraph (optionnel), psycopg2, Qdrant client
-- **Vector store** : Qdrant
-- **Embeddings** : SentenceTransformers
-- **Frontend** : React (Vite)
-- **DB** : PostgreSQL
+Credit Decision AI helps bankers and credit analysts evaluate loan applications using multiple independent AI agents. Each agent focuses on a specific perspective (risk, similarity, policy rules, fraud signals), and their outputs are combined to support a transparent recommendation rather than an automatic decision. The final approval or rejection remains human-driven.
 
-## Démarrage rapide (Docker)
-```bash
-docker-compose up --build
+The system uses a backend API to orchestrate agents, persist their outputs, and present summaries to a banker-facing frontend. A vector database (Qdrant) provides similarity search on historical cases so analysts can compare the current request to comparable profiles and outcomes.
+
+---
+
+## Key Features
+
+- Multi-agent credit analysis (risk, similarity, policy/rules, fraud/anomaly). *(Assumption / Planned for some agents)*
+- Qdrant similarity search on historical cases and repayment patterns.
+- Human-in-the-loop decision support with traceable signals.
+- Explainability via structured summaries and agent outputs.
+- Client history and repayment behavior usage. *(Assumption / Planned)*
+
+---
+
+## System Architecture
+
+### High-level components
+
+- **Frontend:** client and banker interfaces.
+- **Backend (FastAPI):** request handling, orchestration, and persistence.
+- **Multi-agent layer:** independent agents run in parallel and return separate results.
+- **Database (PostgreSQL):** structured storage for cases, agent outputs, and decisions.
+- **Vector database (Qdrant):** similarity search over embeddings.
+
+### Architecture Diagram
+
 ```
-Services exposés :
-- Backend : http://localhost:8000
-- Qdrant : http://localhost:6333
-- Frontend : http://localhost:4173
+┌────────────────────┐              ┌───────────────────┐
+│  Client Frontend   │◄────────────►│   Backend API     │
+│  (React/Vite)      │              │   (FastAPI)       │
+└────────────────────┘              └─────────┬─────────┘
+                                              │
+                                              ▼
+                                ┌─────────────────────────┐
+                                │   Multi-Agent Layer     │
+                                │  (independent agents)   │
+                                └────────────┬────────────┘
+                                             │
+        ┌────────────────┬───────────────────┼───────────────────┬────────────────┐
+        │                │                   │                   │                │
+        ▼                ▼                   ▼                   ▼                ▼
+  ┌──────────┐   ┌─────────────┐   ┌──────────────┐   ┌──────────────┐   ┌────────────┐
+  │   Risk   │   │ Similarity  │   │ Rule/Policy  │   │    Fraud     │   │   Image    │
+  │  Agent   │   │   Agent     │   │    Agent     │   │    Agent     │   │   Agent    │
+  └─────┬────┘   └──────┬──────┘   └──────┬───────┘   └──────┬───────┘   └─────┬──────┘
+        │               │                  │                  │                  │
+        └───────────────┴──────────────────┴──────────────────┴──────────────────┘
+                                             │
+                                             ▼
+                              ┌──────────────────────────────┐
+                              │   PostgreSQL                 │
+                              │   (cases, history)           │
+                              └──────────────┬───────────────┘
+                                             │
+                                             ▼
+                              ┌──────────────────────────────┐
+                              │   Qdrant Vector DB           │
+                              └──────────────────────────────┘
 
-### Initialiser la base (obligatoire)
-Le backend applique de petites migrations au démarrage, mais **les tables doivent exister**.
-
-Depuis l’hôte :
-```bash
-psql postgresql://postgres:postgres@localhost:5432/credit -f data/sql/schema.sql
-```
-
-### (Optionnel) Seeding
-```bash
-DB_HOST=localhost DB_PORT=5432 DB_NAME=credit DB_USER=postgres DB_PASSWORD=postgres \
-python seed_database.py
-```
-
-## Dev local (sans Docker)
-Backend :
-```bash
-cd backend
-DB_HOST=localhost DB_PORT=5432 DB_NAME=credit DB_USER=postgres DB_PASSWORD=postgres \
-uvicorn main:app --reload
-```
-
-Frontend :
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-## Configuration (.env)
-Le fichier `.env` n’est pas versionné. Crée un `.env` local si besoin.
-
-Backend (principaux) :
-- `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`
-- `QDRANT_URL`, `QDRANT_API_KEY`
-- `EMBEDDING_MODEL` (ex: `sentence-transformers/all-MiniLM-L6-v2`)
-- `TOP_K_SIMILAR`
-- `SIMILARITY_DATASET_PATH` (ex: `/app/data/synthetic/credit_dataset.json`)
-- `QDRANT_AUTO_LOAD` (0/1)
-- `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `LLM_MODEL`
-
-Frontend :
-- `VITE_API_URL` (par défaut `/api`)
-- `VITE_PROXY_TARGET` (défini dans docker-compose pour pointer le backend)
-
-## Authentification (démo)
-Login :
-```
-POST /api/auth/login
-{ "email": "banker1@test.com", "password": "hashed-password" }
-```
-Le token renvoyé est obligatoire dans `Authorization: Bearer <token>`.
-
-Comptes seedés (si tu as lancé `seed_database.py`) :
-- `banker1@test.com` / `hashed-password`
-- `client1@test.com` / `hashed-password` (et client2, client3, …)
-
-## Endpoints principaux (résumé)
-### Client
-- `POST /api/client/credit-requests` : création d’un dossier (déclenche l’orchestrateur)
-- `GET /api/client/credit-requests` : liste
-- `GET /api/client/credit-requests/{id}` : détail
-
-### Banquier
-- `GET /api/banker/credit-requests?status=pending|decided`
-- `GET /api/banker/credit-requests/{id}`
-- `POST /api/banker/credit-requests/{id}/decision`
-- `POST /api/banker/credit-requests/{id}/comments`
-- `GET /api/banker/credit-requests/{id}/agent-chat/{agent}`
-- `POST /api/banker/credit-requests/{id}/agent-chat`
-- `POST /api/banker/credit-requests/{id}/rerun`
-
-Note : le chat agent est stocké **en mémoire** (non persistant). Il est réinitialisé au redémarrage du backend.
-
-## Exemple de création de dossier
-```
-POST /api/client/credit-requests
-{
-  "amount": 5000,
-  "duration_months": 24,
-  "monthly_income": 3000,
-  "monthly_charges": 800,
-  "employment_type": "employee",
-  "contract_type": "CDI",
-  "seniority_years": 5,
-  "family_status": "single",
-  "documents": ["salary.pdf", "contract.pdf"]
-}
+Banker ──► Chat UI ──► Agents ──► Qdrant + Database (Assumption / Planned)
 ```
 
-Réponse (extrait) :
+---
+
+## Qdrant Integration
+
+Qdrant is used to retrieve similar historical cases so analysts can compare a new application to past outcomes. The Similarity Agent builds embeddings from a credit profile summary and queries a Qdrant collection named `credit_dataset` using cosine similarity. The default embedding model is `all-MiniLM-L6-v2` (configurable via environment variables).
+
+### Current usage
+
+- Embedding of credit profile summaries.
+- Qdrant collection: `credit_dataset`.
+- Similarity search for top-k comparable cases.
+
+### Possible future extensions *(Assumption / Planned)*
+
+- Embeddings for repayment behavior summaries (late payments, defaults).
+- Similarity search over client history and installment patterns.
+
+---
+
+## Data Flow / Pipeline
+
+1. **Input:** client application data and documents.
+2. **Cleaning:** validate numeric ranges and normalize categorical fields.
+3. **Feature extraction:** structured features for rule-based checks.
+4. **Embeddings:** transform profile summaries into vectors.
+5. **Storage:** PostgreSQL for structured data, Qdrant for vectors.
+6. **Agent inference:** independent agent scoring and explanations.
+7. **Banker review:** human validation of AI signals and final decision.
+
+---
+
+## Multi-Agent Design
+
+- **Risk Agent:** evaluates overall risk and debt ratios. *(Assumption / Planned)*
+- **Similarity Agent (Qdrant):** retrieves comparable cases and statistics.
+- **Rule / Policy Agent:** checks policy constraints and eligibility rules. *(Assumption / Planned)*
+- **Fraud / Anomaly Agent:** flags suspicious patterns. *(Present / Planned depending on dataset)*
+
+Agents run independently and their outputs are aggregated into a single recommendation for the banker.
+
+---
+
+## Banker Interaction
+
+Bankers review the AI-generated summary, inspect similar past cases, and assess risk explanations. A chat-style interface can allow bankers to ask questions such as "Why was this rejected?" or "Show similar cases." *(Assumption / Planned)* The intent is to maximize explainability and transparency while keeping the final decision human-driven.
+
+---
+
+## Project Status & Roadmap
+
+### Implemented / Available
+
+- Backend API for credit requests and orchestration.
+- Similarity Agent with Qdrant integration.
+- PostgreSQL persistence for cases and agent outputs.
+
+### In Progress
+
+- Banker workspace enhancements.
+- Extended similarity analytics.
+
+### Planned
+
+- Full policy/rule agent.
+- Banker–agent chat interface.
+- Client history and installment-level analytics.
+
+---
+
+## Repository Structure
+
 ```
-{
-  "id": "123",
-  "status": "in_review",
-  "summary": "Decision proposee: review | Raisons: aucun signal majeur",
-  "agents": { ... },
-  "decision": null
-}
+├── backend/              FastAPI backend, agents, orchestration, tests
+├── frontend/             React/Vite frontend
+├── data/                 Synthetic datasets and SQL schema files
+├── docker-compose.yml    Local multi-service setup
+├── schema.sql            Database schema
+└── seed_database.py      Optional database seeding script
 ```
 
-## Orchestrateur & agents
-**Orchestrateur (`backend/core/orchestrator.py`)** :
-- prépare le payload (documents + profil + telemetry)
-- exécute les agents
-- normalise flags + explications
-- calcule `reason_codes` et `decision` (recommandation)
-- produit un bundle compact affichable côté frontend
+---
 
-Remarque : la **décision** exposée par l’API (`decision`) correspond à la décision **humaine** enregistrée.  
-La recommandation des agents alimente le `summary` et les `agents`, mais n’écrit pas la décision finale.
+## Technologies Used
 
-**Agents (sorties attendues)** :
-- **Document** : `document_analysis` (flags, dds_score, consistency_level, explanations)
-- **Behavior** : `behavior_analysis` (brs_score, behavior_flags, explanations)
-- **Similarity** : `ai_analysis` + `rag_statistics` (Qdrant)
-- **Fraud** : `fraud_analysis` (fraud_score, risk_level, explanations)
-- **Image** : `image_analysis` (ifs_score, flags, explanations)
-- **Explanation** : `customer_explanation` + `internal_explanation`
-
-Tous les agents exposent un `confidence` pour faciliter l’agrégation.
-
-## Qdrant / Similarité
-Le Similarity Agent utilise Qdrant si configuré.  
-Dataset : `data/synthetic/credit_dataset.json`.
-
-Le script `data/synthetic/loadtoqdrant.py` contient des **identifiants hardcodés** : remplace‑les avant usage.
-
-## Tests
-Backend :
-```bash
-cd backend && pytest
-```
-
-Frontend (Playwright) :
-```bash
-cd frontend && npm run test:e2e
-```
-
-## Structure du projet
-```
-credit-decision-ai/
-├── docker-compose.yml
-├── backend/
-│   ├── main.py
-│   ├── api/            # routes + schemas
-│   ├── core/           # orchestrateur + db
-│   ├── agents/         # agents spécialisés
-│   ├── rag/            # chunking/embedding/retrieval (RAG)
-│   └── tests/
-├── frontend/
-│   ├── src/
-│   └── tests/
-└── data/
-    ├── synthetic/
-    └── sql/
-```
-
-## Règle d’équipe
-Toute nouvelle dépendance Python doit être ajoutée dans `backend/requirements.txt` avant usage.
+- Python
+- FastAPI
+- Qdrant
+- SentenceTransformers
+- PostgreSQL
+- React (Vite)
+- LangChain / LangGraph
