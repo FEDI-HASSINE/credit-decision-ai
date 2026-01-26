@@ -1,0 +1,171 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{hyperref}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{enumitem}
+
+\title{Credit Decision AI: Assisted Credit Risk Analysis with Multi-Agent Signals and Qdrant Similarity}
+\author{Project Team (Hypothesis)}
+\date{\today}
+
+\begin{document}
+
+\begin{titlepage}
+    \centering
+    \vspace*{2cm}
+    {\LARGE Credit Decision AI}\\[0.5cm]
+    {\large Assisted Credit Risk Analysis with Multi-Agent Signals and Qdrant Similarity}\\[1.5cm]
+    \textbf{Authors:} Project Team (Hypothesis)\\
+    \textbf{Institution:} ---\\[0.5cm]
+    \textbf{Date:} \today\\[2cm]
+    \vfill
+    {\small This report is based on the \textit{credit-decision-ai} repository.}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+\section{Reminder of the Idea and Problem}
+\subsection{Project Idea (6--10 lines)}
+The project delivers an AI-assisted credit decision platform that orchestrates multiple specialized agents to analyze a credit request, aggregate signals, and support human decision-making. The backend collects structured borrower data, documents, and telemetry, then runs document, behavior, similarity, fraud, image, and explanation agents. Results are persisted in a relational database and summarized into a readable decision recommendation. A frontend provides separate spaces for clients and bankers, preserving the human-in-the-loop decision workflow. The system does not automate the final decision; instead, it offers explainable signals and risk reasoning. Qdrant is used to retrieve similar historical cases via embeddings to contextualize the current request. The solution aims to be auditable, reproducible, and transparent for credit analysts.\footnote{Some details are marked as \textit{Hypothesis} where repository information is not explicit.}
+
+\subsection{Target Problem}
+Financial institutions need to reduce manual workload while preserving compliance, explainability, and risk management. The concrete problem is to evaluate credit requests consistently, detect potential fraud or anomalies, and offer analysts contextual signals without replacing human judgment.
+
+\subsection{Target Users}
+Primary users are credit analysts and bankers who must decide on loan approvals. Secondary users are applicants who submit credit requests and benefit from faster, more transparent reviews.
+
+\subsection{Added Value}
+The platform improves decision quality by combining multiple AI agents, similarity search in Qdrant, and structured explanations. It centralizes evidence for decision-making, reduces time-to-review, and improves traceability of outcomes.
+
+\section{Architecture and Qdrant Integration}
+\subsection{High-Level Architecture}
+\begin{verbatim}
++------------------+          +-------------------+
+|  Client Frontend |<-------->|  Backend API      |
+|  (React/Vite)    |          |  (FastAPI)        |
++------------------+          +---------+---------+
+                                         |
+                                         v
+                             +-----------+-----------+
+                             |  Orchestrator         |
+                             |  (Multi-agent runner) |
+                             +-----------+-----------+
+                                         |
+         +-------------------------------+-------------------------------+
+         |               |               |               |               |
+         v               v               v               v               v
+   Document Agent   Behavior Agent  Similarity Agent  Fraud Agent   Image Agent
+         |               |               |               |               |
+         +-------------------------------+---------------+---------------+
+                                         |
+                                         v
+                         +---------------+---------------+
+                         |  PostgreSQL (cases, agents)   |
+                         +---------------+---------------+
+                                         |
+                                         v
+                              +----------+----------+
+                              |  Qdrant Vector DB  |
+                              +--------------------+
+\end{verbatim}
+
+\subsection{Components}
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Frontend}: React/Vite UI for clients and bankers.
+    \item \textbf{Backend API}: FastAPI service exposing endpoints for credit requests and decisions.
+    \item \textbf{Auth}: Token-based authentication (demo login endpoint).
+    \item \textbf{Database}: PostgreSQL storing cases, agent outputs, and banker decisions.
+    \item \textbf{ML/LLM}: Specialized agents for document review, behavior scoring, similarity, fraud checks, image analysis, and explanations.
+    \item \textbf{Qdrant}: Vector store used by the Similarity Agent to retrieve comparable historical cases.
+\end{itemize}
+
+\subsection{Request Flow}
+\begin{enumerate}[leftmargin=1.5em]
+    \item Client submits a credit request to the backend.
+    \item The orchestrator prepares payloads and executes all agents.
+    \item The Similarity Agent computes embeddings and queries Qdrant for similar past cases.
+    \item All agent outputs are normalized and persisted to PostgreSQL.
+    \item The banker reviews the summarized recommendation and records a final decision.
+\end{enumerate}
+
+\subsection{Qdrant Integration Details}
+\paragraph{Embedding Model}
+The backend relies on SentenceTransformers, with a typical model like \texttt{all-MiniLM-L6-v2}. This is configurable via \texttt{EMBEDDING\_MODEL}. (Hypothesis: exact model may be adjusted per deployment.)
+
+\paragraph{Vector Structure}
+Each credit case or document chunk is embedded into a dense vector (e.g., 384 dimensions for MiniLM). The vector represents the semantic content of a case summary or applicant profile. (Hypothesis for dimension if using MiniLM.)
+
+\paragraph{Payload Metadata}
+Typical payload fields stored with each vector include:
+\begin{itemize}[leftmargin=1.5em]
+    \item \texttt{case\_id}, \texttt{client\_id}
+    \item financial attributes (income, charges, duration, amount)
+    \item categorical features (employment type, contract type)
+    \item outcome labels (approved/denied) if historical data is available
+\end{itemize}
+
+\paragraph{Indexing Strategy}
+Qdrant collections typically use cosine distance for semantic similarity. (Hypothesis: cosine distance is used, as common with SentenceTransformers.)
+
+\paragraph{Insertion and Search Endpoints}
+The system uses a data-loading script to insert records into Qdrant and a Similarity Agent to query. Example conceptual endpoints:
+\begin{itemize}[leftmargin=1.5em]
+    \item \texttt{POST /api/embeddings/insert} (Hypothesis)
+    \item \texttt{POST /api/similarity/search}
+\end{itemize}
+
+\paragraph{Pseudo-code Snippet}
+\begin{verbatim}
+# Pseudo-code (verbalized)
+vector = embed(case_summary)
+qdrant.upsert(collection="credit_cases", id=case_id,
+              vector=vector,
+              payload={metadata})
+results = qdrant.search(collection="credit_cases",
+                         vector=vector,
+                         top_k=K)
+\end{verbatim}
+
+\section{Data Pipeline}
+\subsection{Overview}
+The data pipeline transforms raw credit application inputs into structured signals and similarity-based context that support decision-making.
+
+\subsection{Detailed Flow}
+\begin{enumerate}[leftmargin=1.5em]
+    \item \textbf{Input}: client-submitted application data, documents, and optional telemetry.
+    \item \textbf{Cleaning}: validation of numerical ranges, normalization of categorical values, and document parsing.
+    \item \textbf{Feature Engineering / Embeddings}: structured features for rule-based agents; sentence embeddings for similarity search.
+    \item \textbf{Storage}: relational storage in PostgreSQL; vector representations in Qdrant.
+    \item \textbf{Inference}: agent scoring, fraud checks, RAG-based similarity retrieval, and explanation generation.
+    \item \textbf{Delivery}: summarized recommendation shown to bankers; clients receive status updates.
+    \item \textbf{Monitoring}: logs, error tracking, and basic quality checks (e.g., missing fields, anomalous scores).
+\end{enumerate}
+
+\section{Project Timeline}
+\subsection{Status Table}
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Task} & \textbf{Status} & \textbf{Date (Approx.)} & \textbf{Priority} \\
+\midrule
+Define multi-agent architecture & Done & 2024--Q1 (Hypothesis) & High \\
+Implement FastAPI endpoints & Done & 2024--Q1 (Hypothesis) & High \\
+Integrate PostgreSQL persistence & Done & 2024--Q1 (Hypothesis) & High \\
+Qdrant similarity pipeline & In progress & 2024--Q2 (Hypothesis) & High \\
+Frontend banker workspace & In progress & 2024--Q2 (Hypothesis) & Medium \\
+Monitoring and analytics dashboard & Planned & 2024--Q3 (Hypothesis) & Medium \\
+Model evaluation and calibration & Planned & 2024--Q3 (Hypothesis) & High \\
+Compliance documentation & Planned & 2024--Q4 (Hypothesis) & Medium \\
+\bottomrule
+\end{tabular}
+\caption{Project timeline with completed, ongoing, and future tasks (Hypothesis dates).}
+\end{table}
+
+\section{Conclusion}
+The Credit Decision AI project combines a multi-agent AI backend, transparent reasoning, and Qdrant-based similarity search to support credit analysts. It aims to streamline reviews while keeping the final decision in human hands, improving both efficiency and auditability.
+
+\end{document}
