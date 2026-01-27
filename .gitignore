@@ -27,11 +27,10 @@ Thumbs.db
 # Runtime uploads
 data/uploads/
 
-# Keep .env tracked (team-shared), ignore variants
+# Environment files (never commit secrets)
+.env
 *.env.local
 .env.development
 .env.production
-.env
-backend/.env
 backend/.env
 backend/.env.backup
