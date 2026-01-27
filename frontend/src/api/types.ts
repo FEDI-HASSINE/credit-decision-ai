@@ -45,6 +45,84 @@ export interface AgentResult {
     internal_explanation?: unknown;
     customer_explanation?: unknown;
     global_summary?: string;
+    document_details?: {
+      consistency_level?: string;
+      dds_score?: number;
+      extracted_fields?: {
+        income_documented?: number;
+        contract_type_detected?: string;
+        seniority_detected_years?: number;
+      };
+      missing_documents?: string[];
+      suspicious_patterns?: string[];
+    };
+    decision_details?: {
+      recommendation?: string;
+      confidence?: number;
+      human_review_required?: boolean;
+      reasons?: Array<{ code?: string; label?: string }>;
+      review_triggers?: string[];
+      conflicts?: Array<{ type?: string; severity?: string; description?: string }>;
+      risk_indicators?: string[];
+      summary?: string;
+    };
+    similarity_details?: {
+      report?: string;
+      breakdown?: {
+        ok?: number;
+        default?: number;
+        fraud?: number;
+      };
+      buckets?: Array<{
+        label?: string;
+        min?: number;
+        max?: number;
+        count?: number;
+        default_count?: number;
+        fraud_count?: number;
+        default_rate?: number;
+        fraud_rate?: number;
+        avg_similarity?: number;
+      }>;
+      cases?: Array<{
+        case_id?: string | number;
+        similarity_score?: number;
+        similarity_pct?: number;
+        status?: string;
+        loan_amount?: number;
+        loan_duration?: number;
+        employment_type?: string;
+        contract_type?: string;
+      }>;
+      stats?: {
+        total_similar_cases?: number;
+        similar_good_profiles?: number;
+        similar_bad_profiles?: number;
+        fraud_cases?: number;
+        repayment_success_rate?: number;
+        default_rate?: number;
+        fraud_ratio?: number;
+        average_similarity?: number;
+        min_similarity?: number;
+        median_similarity?: number;
+        max_similarity?: number;
+      };
+      analysis?: {
+        recommendation?: string;
+        risk_level?: string;
+        risk_score?: number;
+        confidence_level?: string;
+        points_forts?: string[];
+        points_faibles?: string[];
+        conditions?: string[];
+        summary?: string;
+        reasoning?: string;
+        payment_history_assessment?: {
+          label?: string;
+          note?: string;
+        };
+      };
+    };
   };
   confidence?: number;
 }
@@ -53,6 +131,7 @@ export interface AgentBundle {
   document?: AgentResult;
   similarity?: AgentResult;
   fraud?: AgentResult;
+  decision?: AgentResult;
   explanation?: AgentResult;
   behavior?: AgentResult;
   image?: AgentResult;

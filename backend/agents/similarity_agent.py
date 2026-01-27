@@ -137,6 +137,184 @@ def _format_payment_summary_for_prompt(summary: Optional[Dict[str, Any]]) -> str
     )
 
 
+def _case_status(case: Dict[str, Any]) -> str:
+    if case.get("fraud_flag"):
+        return "FRAUD"
+    if case.get("defaulted"):
+        return "DEFAULT"
+    return "OK"
+
+
+def _compact_similar_cases(
+    cases: List[Dict[str, Any]],
+    limit: int = 8,
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    breakdown = {"ok": 0, "default": 0, "fraud": 0}
+    compact: List[Dict[str, Any]] = []
+
+    for case in cases:
+        status = _case_status(case)
+        if status == "FRAUD":
+            breakdown["fraud"] += 1
+        elif status == "DEFAULT":
+            breakdown["default"] += 1
+        else:
+            breakdown["ok"] += 1
+
+        if len(compact) < limit:
+            payload = case.get("payload") or {}
+            score = float(case.get("similarity_score") or 0)
+            compact.append(
+                {
+                    "case_id": case.get("case_id"),
+                    "similarity_score": round(score, 4),
+                    "similarity_pct": int(score * 100),
+                    "status": status,
+                    "loan_amount": payload.get("loan_amount"),
+                    "loan_duration": payload.get("loan_duration"),
+                    "employment_type": payload.get("employment_type"),
+                    "contract_type": payload.get("contract_type"),
+                }
+            )
+
+    return compact, breakdown
+
+
+def _build_similarity_report(
+    stats: Dict[str, Any],
+    breakdown: Dict[str, int],
+    ai_analysis: Dict[str, Any],
+) -> str:
+    total = int(stats.get("total_similar", 0) or 0)
+    avg_similarity = float(stats.get("avg_similarity", 0.0) or 0.0)
+    min_similarity = float(stats.get("min_similarity", 0.0) or 0.0)
+    max_similarity = float(stats.get("max_similarity", 0.0) or 0.0)
+    median_similarity = float(stats.get("median_similarity", 0.0) or 0.0)
+    default_rate = float(stats.get("default_rate", 0.0) or 0.0)
+    fraud_rate = float(stats.get("fraud_rate", 0.0) or 0.0)
+
+    recommendation = str(ai_analysis.get("recommendation", "REVISER"))
+    risk_level = str(ai_analysis.get("risk_level", "modere"))
+    try:
+        risk_score = float(ai_analysis.get("risk_score", 0.5))
+    except (TypeError, ValueError):
+        risk_score = 0.5
+
+    payment_assessment = ai_analysis.get("payment_history_assessment")
+    payment_note = None
+    if isinstance(payment_assessment, dict):
+        note = payment_assessment.get("note")
+        if isinstance(note, str) and note.strip():
+            payment_note = note.strip()
+
+    if total <= 0:
+        report = (
+            "Aucun dossier similaire trouve; comparaison limitee. "
+            f"Recommandation: {recommendation} (risque {risk_level}, score {round(risk_score, 2)})."
+        )
+        if payment_note:
+            report += f" Historique de paiement: {payment_note}."
+        return report
+
+    avg_pct = int(avg_similarity * 100)
+    min_pct = int(min_similarity * 100)
+    median_pct = int(median_similarity * 100)
+    max_pct = int(max_similarity * 100)
+    default_pct = int(default_rate * 100)
+    fraud_pct = int(fraud_rate * 100)
+
+    sentences = [
+        (
+            f"{total} dossiers similaires trouves; similarite moyenne {avg_pct}% "
+            f"(min {min_pct}%, mediane {median_pct}%, max {max_pct}%)."
+        ),
+        (
+            f"Historique pair: defaut {default_pct}%, fraude {fraud_pct}% "
+            f"(OK {breakdown.get('ok', 0)}, defaut {breakdown.get('default', 0)}, fraude {breakdown.get('fraud', 0)})."
+        ),
+    ]
+    if payment_note:
+        sentences.append(f"Historique de paiement: {payment_note}.")
+    sentences.append(
+        f"Recommandation: {recommendation} (risque {risk_level}, score {round(risk_score, 2)})."
+    )
+    return " ".join(sentences)
+
+
+def _build_similarity_buckets(cases: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    buckets = [
+        {"label": "Tres proche (>=0.8)", "min": 0.8, "max": 1.0},
+        {"label": "Proche (0.6-0.8)", "min": 0.6, "max": 0.8},
+        {"label": "Moyen (0.4-0.6)", "min": 0.4, "max": 0.6},
+        {"label": "Faible (<0.4)", "min": 0.0, "max": 0.4},
+    ]
+
+    for bucket in buckets:
+        bucket["count"] = 0
+        bucket["default_count"] = 0
+        bucket["fraud_count"] = 0
+        bucket["avg_similarity"] = 0.0
+
+    sums = {bucket["label"]: 0.0 for bucket in buckets}
+
+    for case in cases:
+        score = float(case.get("similarity_score") or 0.0)
+        target = None
+        if score >= 0.8:
+            target = buckets[0]
+        elif score >= 0.6:
+            target = buckets[1]
+        elif score >= 0.4:
+            target = buckets[2]
+        else:
+            target = buckets[3]
+
+        target["count"] += 1
+        if case.get("defaulted"):
+            target["default_count"] += 1
+        if case.get("fraud_flag"):
+            target["fraud_count"] += 1
+        sums[target["label"]] += score
+
+    for bucket in buckets:
+        count = bucket["count"]
+        bucket["default_rate"] = round(bucket["default_count"] / count, 3) if count else 0.0
+        bucket["fraud_rate"] = round(bucket["fraud_count"] / count, 3) if count else 0.0
+        bucket["avg_similarity"] = round(sums[bucket["label"]] / count, 4) if count else 0.0
+
+    return buckets
+
+
+def _augment_similarity_flags(ai_analysis: Dict[str, Any], stats: Dict[str, Any]) -> Dict[str, Any]:
+    red_flags = ai_analysis.get("red_flags")
+    if not isinstance(red_flags, list):
+        red_flags = [] if red_flags is None else [str(red_flags)]
+
+    def add_flag(flag: str) -> None:
+        if flag not in red_flags:
+            red_flags.append(flag)
+
+    total = int(stats.get("total_similar", 0) or 0)
+    avg_similarity = float(stats.get("avg_similarity", 0.0) or 0.0)
+    default_rate = float(stats.get("default_rate", 0.0) or 0.0)
+    fraud_rate = float(stats.get("fraud_rate", 0.0) or 0.0)
+
+    if total == 0:
+        add_flag("NO_SIMILAR_CASES")
+    elif total < 3:
+        add_flag("LOW_SIMILARITY_SAMPLE")
+
+    if avg_similarity < 0.4:
+        add_flag("LOW_AVG_SIMILARITY")
+    if default_rate > 0.4:
+        add_flag("PEER_DEFAULT_RATE_HIGH")
+    if fraud_rate > 0.15:
+        add_flag("PEER_FRAUD_RATE_HIGH")
+
+    ai_analysis["red_flags"] = red_flags
+    return ai_analysis
+
+
 # ==============================================================================
 # PROMPTS
 # ==============================================================================
@@ -710,7 +888,8 @@ class SimilarityAgentAI:
         if not similar_cases:
             stats = {
                 "total_similar":  0, "good_profiles": 0, "bad_profiles": 0, "fraud_cases": 0,
-                "success_rate": 0, "default_rate": 0, "fraud_rate": 0, "avg_similarity": 0
+                "success_rate": 0, "default_rate": 0, "fraud_rate": 0, "avg_similarity": 0,
+                "min_similarity": 0.0, "median_similarity": 0.0, "max_similarity": 0.0,
             }
         else:
             total = len(similar_cases)
@@ -718,6 +897,12 @@ class SimilarityAgentAI:
             bad = sum(1 for c in similar_cases if c["defaulted"])
             fraud = sum(1 for c in similar_cases if c["fraud_flag"])
             avg_sim = sum(c["similarity_score"] for c in similar_cases) / total
+            scores = sorted(float(c.get("similarity_score") or 0.0) for c in similar_cases)
+            mid = total // 2
+            if total % 2 == 0:
+                median_sim = (scores[mid - 1] + scores[mid]) / 2
+            else:
+                median_sim = scores[mid]
             
             stats = {
                 "total_similar": total,
@@ -727,7 +912,10 @@ class SimilarityAgentAI:
                 "success_rate": good / total,
                 "default_rate": bad / total,
                 "fraud_rate": fraud / total,
-                "avg_similarity":  avg_sim
+                "avg_similarity":  avg_sim,
+                "min_similarity": scores[0] if scores else 0.0,
+                "median_similarity": median_sim if scores else 0.0,
+                "max_similarity": scores[-1] if scores else 0.0,
             }
             
         print("   Taux de succes historique: " + str(int(stats["success_rate"] * 100)) + "%")
@@ -748,6 +936,7 @@ class SimilarityAgentAI:
             if payment_summary:
                 assessment = _classify_payment_summary(payment_summary)
                 ai_analysis = self._apply_payment_assessment(ai_analysis, assessment)
+            ai_analysis = _augment_similarity_flags(ai_analysis, state.get("stats", {}))
             return {"ai_analysis": ai_analysis}
             
         profile_dict = state["profile_dict"]
@@ -772,6 +961,7 @@ class SimilarityAgentAI:
             if payment_summary:
                 assessment = _classify_payment_summary(payment_summary)
                 ai_analysis = self._apply_payment_assessment(ai_analysis, assessment)
+            ai_analysis = _augment_similarity_flags(ai_analysis, state.get("stats", {}))
             return {"ai_analysis": ai_analysis}
             
         except Exception as e:
@@ -781,12 +971,19 @@ class SimilarityAgentAI:
             if payment_summary:
                 assessment = _classify_payment_summary(payment_summary)
                 ai_analysis = self._apply_payment_assessment(ai_analysis, assessment)
+            ai_analysis = _augment_similarity_flags(ai_analysis, state.get("stats", {}))
             return {"ai_analysis": ai_analysis}
 
     def node_format_output(self, state: AgentState) -> Dict:
         """Etape Finale: Construction de la reponse"""
         stats = state["stats"]
         ai_analysis = state["ai_analysis"]
+        compact_cases, breakdown = _compact_similar_cases(state.get("similar_cases", []), limit=8)
+        similarity_buckets = _build_similarity_buckets(state.get("similar_cases", []))
+        similarity_report = _build_similarity_report(stats, breakdown, ai_analysis)
+
+        if not ai_analysis.get("summary"):
+            ai_analysis["summary"] = similarity_report
 
         confidence_level = str(ai_analysis.get("confidence_level", "low")).lower()
         confidence_map = {"high": 0.85, "medium": 0.65, "low": 0.45}
@@ -812,9 +1009,16 @@ class SimilarityAgentAI:
                 "repayment_success_rate": round(stats["success_rate"], 2),
                 "default_rate": round(stats["default_rate"], 2),
                 "fraud_ratio": round(stats["fraud_rate"], 2),
-                "average_similarity": round(stats["avg_similarity"], 4)
+                "average_similarity": round(stats["avg_similarity"], 4),
+                "min_similarity": round(stats.get("min_similarity", 0.0), 4),
+                "median_similarity": round(stats.get("median_similarity", 0.0), 4),
+                "max_similarity": round(stats.get("max_similarity", 0.0), 4),
             },
             "ai_analysis": ai_analysis,
+            "similarity_report": similarity_report,
+            "similarity_breakdown": breakdown,
+            "similarity_cases": compact_cases,
+            "similarity_buckets": similarity_buckets,
             "confidence": round(confidence, 4),
             "metadata": {
                 "agent_version": "2.0-AI-LangChain",

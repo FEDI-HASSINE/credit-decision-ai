@@ -119,6 +119,73 @@ def _normalize_explanations(
     return normalized
 
 
+_DECISION_REASON_LABELS = {
+    "HIGH_DTI": "Ratio d'endettement élevé",
+    "DOC_INCONSISTENCY": "Incohérences documentaires",
+    "INCOME_INSTABILITY": "Revenus instables ou incohérents",
+    "PEER_RISK_HIGH": "Profil similaire à des cas risqués",
+    "PAYMENT_HISTORY_GOOD": "Historique de paiement solide",
+    "PAYMENT_HISTORY_POOR": "Historique de paiement dégradé",
+}
+
+
+def _decision_reason_label(code: str) -> str:
+    return _DECISION_REASON_LABELS.get(code, code.replace("_", " ").title())
+
+
+def _build_decision_agent_output(
+    decision_payload: Dict[str, Any],
+    orchestrator_output: Dict[str, Any],
+    explanation_result: Dict[str, Any],
+) -> Dict[str, Any]:
+    reason_codes = _safe_list(decision_payload.get("reason_codes", []))
+    decision = decision_payload.get("decision") or orchestrator_output.get("proposed_decision") or "review"
+    confidence = decision_payload.get("decision_confidence", orchestrator_output.get("decision_confidence"))
+    human_review_required = decision_payload.get("human_review_required", orchestrator_output.get("human_review_required"))
+
+    internal_expl = (explanation_result.get("explanation") or {}).get("internal_explanation", {}) if isinstance(explanation_result, dict) else {}
+    internal_summary = internal_expl.get("summary") if isinstance(internal_expl, dict) else None
+
+    reasons = [
+        {"code": code, "label": _decision_reason_label(code)}
+        for code in reason_codes
+        if isinstance(code, str)
+    ]
+    reason_text = ", ".join([r["label"] for r in reasons]) if reasons else "aucun signal majeur"
+    summary = internal_summary or f"Recommandation: {decision}. Raisons principales: {reason_text}."
+    if human_review_required:
+        summary += " Revue humaine requise."
+
+    flag_explanations = {code: _decision_reason_label(code) for code in reason_codes if isinstance(code, str)}
+    explanations = _normalize_explanations(
+        {"flag_explanations": flag_explanations},
+        reason_codes,
+        summary=summary,
+        fallback_prefix="Raison",
+    )
+
+    decision_details = {
+        "recommendation": decision,
+        "confidence": confidence,
+        "human_review_required": human_review_required,
+        "reasons": reasons,
+        "review_triggers": orchestrator_output.get("review_triggers"),
+        "conflicts": orchestrator_output.get("detected_conflicts"),
+        "risk_indicators": orchestrator_output.get("risk_indicators"),
+        "summary": summary,
+    }
+
+    explanations["decision_details"] = decision_details
+
+    return {
+        "name": "decision",
+        "score": confidence,
+        "flags": reason_codes,
+        "explanations": explanations,
+        "confidence": confidence,
+    }
+
+
 def _build_documents_payload(request_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     payloads: List[Dict[str, Any]] = []
     document_texts = request_data.get("document_texts") or {}
@@ -295,6 +362,15 @@ def _build_agent_bundle(
         doc_flags,
         fallback_prefix="Signal document",
     )
+    document_details: Dict[str, Any] = {
+        "consistency_level": doc_analysis.get("consistency_level"),
+        "dds_score": doc_analysis.get("dds_score"),
+        "extracted_fields": doc_analysis.get("extracted_fields"),
+        "missing_documents": doc_analysis.get("missing_documents"),
+        "suspicious_patterns": doc_analysis.get("suspicious_patterns"),
+    }
+    if any(value for value in document_details.values()):
+        doc_explanations["document_details"] = document_details
     bundle["document"] = {
         "name": "document",
         "score": doc_analysis.get("dds_score"),
@@ -303,8 +379,12 @@ def _build_agent_bundle(
         "confidence": doc_result.get("confidence"),
     }
 
+    sim_result = sim_result if isinstance(sim_result, dict) else {}
     sim_analysis = sim_result.get("ai_analysis", {})
-    sim_summary = sim_analysis.get("summary") or sim_analysis.get("reasoning")
+    sim_report = sim_result.get("similarity_report")
+    sim_summary = sim_analysis.get("summary") or sim_analysis.get("reasoning") or sim_report
+    if sim_report and (not sim_summary or len(str(sim_summary)) < 120):
+        sim_summary = sim_report
     sim_flags = _safe_list(sim_analysis.get("red_flags", []))
     sim_explanations = _normalize_explanations(
         {},
@@ -312,6 +392,40 @@ def _build_agent_bundle(
         summary=sim_summary,
         fallback_prefix="Signal similarite",
     )
+    similarity_details: Dict[str, Any] = {}
+    if isinstance(sim_report, str) and sim_report:
+        similarity_details["report"] = sim_report
+    breakdown = sim_result.get("similarity_breakdown")
+    if isinstance(breakdown, dict) and breakdown:
+        similarity_details["breakdown"] = breakdown
+    cases = sim_result.get("similarity_cases")
+    if isinstance(cases, list) and cases:
+        similarity_details["cases"] = cases
+    buckets = sim_result.get("similarity_buckets")
+    if isinstance(buckets, list) and buckets:
+        similarity_details["buckets"] = buckets
+    stats = sim_result.get("rag_statistics")
+    if isinstance(stats, dict) and stats:
+        similarity_details["stats"] = stats
+    analysis_details: Dict[str, Any] = {}
+    for key in (
+        "recommendation",
+        "risk_level",
+        "risk_score",
+        "confidence_level",
+        "points_forts",
+        "points_faibles",
+        "conditions",
+        "summary",
+        "reasoning",
+        "payment_history_assessment",
+    ):
+        if key in sim_analysis:
+            analysis_details[key] = sim_analysis.get(key)
+    if analysis_details:
+        similarity_details["analysis"] = analysis_details
+    if similarity_details:
+        sim_explanations["similarity_details"] = similarity_details
     bundle["similarity"] = {
         "name": "similarity",
         "score": sim_analysis.get("risk_score"),
@@ -539,6 +653,11 @@ def run_orchestrator(request_data: Dict[str, Any]) -> Dict[str, Any]:
         explanation_result = {"case_id": case_id, "explanation": {}, "explanation_confidence": 0.0}
 
     agent_bundle = _build_agent_bundle(doc_result, sim_result, behavior_result, fraud_result, image_result, explanation_result)
+    agent_bundle["decision"] = _build_decision_agent_output(
+        decision_payload,
+        orchestrator_output,
+        explanation_result,
+    )
     customer_expl = (explanation_result.get("explanation") or {}).get("customer_explanation", {})
     customer_summary = customer_expl.get("summary")
     if customer_summary:

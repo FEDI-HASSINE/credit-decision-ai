@@ -189,6 +189,8 @@ def _map_agent_outputs(agent_rows: List[Dict[str, Any]]) -> Optional[AgentBundle
             bundle.similarity = result
         elif name == "fraud":
             bundle.fraud = result
+        elif name == "decision":
+            bundle.decision = result
         elif name == "behavior":
             bundle.behavior = result
         elif name == "image":
@@ -333,7 +335,7 @@ def _build_chat_snapshot(detail: Dict[str, Any]) -> Dict[str, Any]:
 def _prime_agent_sessions(detail: Dict[str, Any]) -> None:
     case_id = int(detail["case_id"])
     snapshot = _build_chat_snapshot(detail)
-    for agent_name in ("document", "behavior", "similarity", "fraud", "image"):
+    for agent_name in ("document", "behavior", "similarity", "fraud", "image", "decision"):
         ensure_agent_session_snapshot(case_id, agent_name, snapshot)
 
 

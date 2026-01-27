@@ -335,7 +335,7 @@ def create_credit_request(
                 if orchestration:
                     agents = (orchestration or {}).get("agents") or {}
                     for agent_name, output in agents.items():
-                        if agent_name not in {"document", "similarity", "behavior", "fraud", "image"}:
+                        if agent_name not in {"document", "similarity", "behavior", "fraud", "image", "decision"}:
                             continue
                         cur.execute(
                             """
@@ -470,7 +470,7 @@ def save_orchestration(case_id: int, orchestration: Dict[str, Any]) -> None:
 
                 agents = orchestration.get("agents") or {}
                 for agent_name, output in agents.items():
-                    if agent_name not in {"document", "similarity", "behavior", "fraud", "image"}:
+                    if agent_name not in {"document", "similarity", "behavior", "fraud", "image", "decision"}:
                         continue
                     cur.execute(
                         """

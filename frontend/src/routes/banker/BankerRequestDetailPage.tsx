@@ -307,6 +307,7 @@ export const BankerRequestDetailPage = () => {
         )}
       </div>
 
+      {data.agents?.decision && <AgentPanel title="Agent Décision" agent={data.agents.decision} />}
       {data.agents?.document && <AgentPanel title="Agent Documents" agent={data.agents.document} />}
       {data.agents?.similarity && <AgentPanel title="Agent Similarité" agent={data.agents.similarity} />}
       {data.agents?.behavior && <AgentPanel title="Agent Comportement" agent={data.agents.behavior} />}

@@ -59,6 +59,7 @@ class AgentBundle(BaseModel):
     document: Optional[AgentResult] = None
     similarity: Optional[AgentResult] = None
     fraud: Optional[AgentResult] = None
+    decision: Optional[AgentResult] = None
     explanation: Optional[AgentResult] = None
     behavior: Optional[AgentResult] = None
     image: Optional[AgentResult] = None

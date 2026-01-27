@@ -119,6 +119,18 @@ def _summarize_orchestrator(agent_data: Dict[str, Any]) -> str:
     )
 
 
+def _summarize_decision(agent_data: Dict[str, Any]) -> str:
+    decision = agent_data.get("decision") or agent_data.get("recommendation") or agent_data.get("proposed_decision")
+    confidence = agent_data.get("confidence") or agent_data.get("decision_confidence")
+    reasons = agent_data.get("reason_codes") or agent_data.get("reasons") or []
+    return (
+        "Decision: "
+        f"recommendation={decision or 'n/a'}, "
+        f"confidence={confidence or 'n/a'}, "
+        f"reasons={reasons}"
+    )
+
+
 def _build_agent_context(agent_name: str, request: Dict[str, Any]) -> Dict[str, Any]:
     agents_raw = _safe_dict(request.get("agents_raw"))
     agents_compact = _safe_dict(request.get("agents"))
@@ -186,6 +198,8 @@ def _fallback_reply(agent_name: str, request: Dict[str, Any]) -> str:
         summaries.append(_summarize_explanation(expl_payload))
     elif agent_name == "orchestrator":
         summaries.append(_summarize_orchestrator(orchestrator))
+    elif agent_name == "decision":
+        summaries.append(_summarize_decision(_safe_dict(agents_raw.get("decision_agent"))))
     else:
         summaries.append("Agent inconnu: aucune donnée disponible.")
 

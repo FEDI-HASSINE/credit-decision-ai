@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS documents (
 CREATE TABLE IF NOT EXISTS agent_outputs (
     output_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     case_id BIGINT NOT NULL REFERENCES credit_cases(case_id) ON DELETE CASCADE,
-    agent_name TEXT NOT NULL CHECK (agent_name IN ('document', 'image', 'behavior', 'similarity', 'fraud')),
+    agent_name TEXT NOT NULL CHECK (agent_name IN ('document', 'image', 'behavior', 'similarity', 'fraud', 'decision')),
     output_json JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
