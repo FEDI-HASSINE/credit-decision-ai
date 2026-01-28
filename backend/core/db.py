@@ -335,14 +335,14 @@ def create_credit_request(
                 if orchestration:
                     agents = (orchestration or {}).get("agents") or {}
                     for agent_name, output in agents.items():
-                        if agent_name not in {"document", "similarity", "behavior", "fraud", "image", "decision"}:
+                        if agent_name not in {"document", "similarity", "behavior", "fraud", "image", "decision", "explanation"}:
                             continue
                         cur.execute(
                             """
                             INSERT INTO agent_outputs (case_id, agent_name, output_json)
                             VALUES (%s, %s, %s::jsonb)
                             """,
-                            (case_id, agent_name, json.dumps(output)),
+                            (case_id, agent_name, _json_dumps(output)),
                         )
 
                 return {
@@ -420,6 +420,107 @@ def add_case_documents(case_id: int, documents: List[Dict[str, Any]]) -> None:
         conn.close()
 
 
+def resubmit_credit_request_db(case_id: int, user_id: int, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    conn = _connect()
+    try:
+        with conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT case_id
+                    FROM credit_cases
+                    WHERE case_id = %s AND user_id = %s
+                    """,
+                    (case_id, user_id),
+                )
+                if not cur.fetchone():
+                    return None
+
+                cur.execute(
+                    """
+                    UPDATE credit_cases
+                    SET loan_amount = %s,
+                        loan_duration = %s,
+                        summary = NULL,
+                        auto_decision = NULL,
+                        auto_decision_confidence = NULL,
+                        auto_review_required = NULL,
+                        status = 'SUBMITTED',
+                        updated_at = NOW()
+                    WHERE case_id = %s
+                    """,
+                    (
+                        payload.get("amount"),
+                        payload.get("duration_months"),
+                        case_id,
+                    ),
+                )
+
+                cur.execute(
+                    """
+                    UPDATE financial_profile
+                    SET monthly_income = %s,
+                        other_income = %s,
+                        monthly_charges = %s,
+                        employment_type = %s,
+                        contract_type = %s,
+                        seniority_years = %s,
+                        marital_status = %s,
+                        number_of_children = %s,
+                        spouse_employed = %s,
+                        housing_status = %s,
+                        is_primary_holder = %s
+                    WHERE case_id = %s
+                    """,
+                    (
+                        payload.get("monthly_income"),
+                        payload.get("other_income", 0),
+                        payload.get("monthly_charges"),
+                        payload.get("employment_type"),
+                        _normalize_contract_type(payload.get("contract_type")),
+                        payload.get("seniority_years"),
+                        payload.get("family_status") or payload.get("marital_status"),
+                        payload.get("number_of_children", 0),
+                        payload.get("spouse_employed"),
+                        payload.get("housing_status"),
+                        payload.get("is_primary_holder"),
+                        case_id,
+                    ),
+                )
+
+                cur.execute(
+                    """
+                    DELETE FROM decisions
+                    WHERE case_id = %s
+                    """,
+                    (case_id,),
+                )
+                cur.execute(
+                    """
+                    DELETE FROM agent_outputs
+                    WHERE case_id = %s
+                    """,
+                    (case_id,),
+                )
+                cur.execute(
+                    """
+                    DELETE FROM agent_sessions
+                    WHERE case_id = %s
+                    """,
+                    (case_id,),
+                )
+
+                documents = payload.get("documents") or []
+                if documents:
+                    _insert_documents(cur, case_id, documents)
+
+                return {
+                    "case_id": case_id,
+                }
+    finally:
+        conn.close()
+
+
 def save_orchestration(case_id: int, orchestration: Dict[str, Any]) -> None:
     if not orchestration:
         return
@@ -470,14 +571,14 @@ def save_orchestration(case_id: int, orchestration: Dict[str, Any]) -> None:
 
                 agents = orchestration.get("agents") or {}
                 for agent_name, output in agents.items():
-                    if agent_name not in {"document", "similarity", "behavior", "fraud", "image", "decision"}:
+                    if agent_name not in {"document", "similarity", "behavior", "fraud", "image", "decision", "explanation"}:
                         continue
                     cur.execute(
                         """
                         INSERT INTO agent_outputs (case_id, agent_name, output_json)
                         VALUES (%s, %s, %s::jsonb)
                         """,
-                        (case_id, agent_name, json.dumps(output)),
+                        (case_id, agent_name, _json_dumps(output)),
                     )
     finally:
         conn.close()
@@ -546,33 +647,82 @@ def list_cases_for_banker(status_filter: Optional[str] = None) -> List[Dict[str,
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             if status_filter == "pending":
-                cur.execute(
-                    """
-                    SELECT case_id
-                    FROM credit_cases
-                    WHERE status IN ('SUBMITTED', 'UNDER_REVIEW')
-                    ORDER BY created_at DESC
-                    """
-                )
+                where_clause = "WHERE c.status IN ('SUBMITTED', 'UNDER_REVIEW')"
+                params: tuple = ()
             elif status_filter == "decided":
-                cur.execute(
-                    """
-                    SELECT case_id
-                    FROM credit_cases
-                    WHERE status = 'DECIDED'
-                    ORDER BY created_at DESC
-                    """
-                )
+                where_clause = "WHERE c.status = 'DECIDED'"
+                params = ()
             else:
-                cur.execute(
-                    """
-                    SELECT case_id
-                    FROM credit_cases
-                    ORDER BY created_at DESC
-                    """
-                )
-            case_ids = [row["case_id"] for row in cur.fetchall()]
-        return [fetch_case_overview(case_id) for case_id in case_ids if case_id is not None]
+                where_clause = ""
+                params = ()
+
+            cur.execute(
+                f"""
+                SELECT
+                    c.case_id,
+                    c.user_id,
+                    c.status,
+                    c.loan_amount,
+                    c.loan_duration,
+                    c.summary,
+                    c.auto_decision,
+                    c.auto_decision_confidence,
+                    c.auto_review_required,
+                    c.created_at,
+                    c.updated_at,
+                    f.monthly_income,
+                    f.other_income,
+                    f.monthly_charges,
+                    f.employment_type,
+                    f.contract_type,
+                    f.seniority_years,
+                    f.marital_status,
+                    f.number_of_children,
+                    f.spouse_employed,
+                    f.housing_status,
+                    f.is_primary_holder,
+                    d.decision AS decision_value,
+                    d.confidence AS decision_confidence,
+                    d.reason_codes AS decision_reason_codes,
+                    d.note AS decision_note,
+                    d.decided_by AS decision_decided_by,
+                    d.decided_at AS decision_decided_at
+                FROM credit_cases c
+                JOIN financial_profile f ON f.case_id = c.case_id
+                LEFT JOIN decisions d ON d.case_id = c.case_id
+                {where_clause}
+                ORDER BY c.created_at DESC
+                """,
+                params,
+            )
+            rows = cur.fetchall()
+
+            results: List[Dict[str, Any]] = []
+            for row in rows:
+                if row.get("decision_value") is not None:
+                    row["decision"] = {
+                        "decision": row.pop("decision_value"),
+                        "confidence": row.pop("decision_confidence"),
+                        "reason_codes": row.pop("decision_reason_codes"),
+                        "note": row.pop("decision_note"),
+                        "decided_by": row.pop("decision_decided_by"),
+                        "decided_at": row.pop("decision_decided_at"),
+                    }
+                else:
+                    row.pop("decision_value", None)
+                    row.pop("decision_confidence", None)
+                    row.pop("decision_reason_codes", None)
+                    row.pop("decision_note", None)
+                    row.pop("decision_decided_by", None)
+                    row.pop("decision_decided_at", None)
+                    row["decision"] = None
+
+                row["documents"] = []
+                row["agent_outputs"] = []
+                row["comments"] = []
+                results.append(row)
+
+            return results
     finally:
         conn.close()
 

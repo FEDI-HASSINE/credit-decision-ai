@@ -169,15 +169,19 @@ Réponds en JSON: {{"flag_explanations": {{flag: texte}}, "global_summary": "...
         }
 
     import json
+    cleaned = content.replace("```json", "```").replace("```", "").replace("Réponse en JSON :", "").strip()
+    candidate = cleaned
+    if "{" in cleaned and "}" in cleaned:
+        candidate = cleaned[cleaned.find("{") : cleaned.rfind("}") + 1]
     try:
-        parsed = json.loads(content)
+        parsed = json.loads(candidate)
         if isinstance(parsed, dict) and "flag_explanations" in parsed and "global_summary" in parsed:
             return parsed
     except Exception:
         pass
     return {
-        "flag_explanations": {flag: content for flag in flags},
-        "global_summary": content,
+        "flag_explanations": {flag: cleaned for flag in flags},
+        "global_summary": cleaned,
     }
 
 
@@ -456,4 +460,3 @@ def analyze_documents(request: Dict[str, Any]) -> Dict[str, Any]:
     state = _node_llm_explain(state)
     state = _node_finalize(state)
     return state.get("output", {})
-

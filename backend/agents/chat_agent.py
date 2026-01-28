@@ -245,7 +245,7 @@ def generate_agent_reply(agent_name: str, request: Dict[str, Any], history: List
             role = "user"
         history_messages.append({"role": role, "content": str(msg.get("content", ""))})
 
-    prompt_context = "CONTEXTE (JSON):\n" + json.dumps(context, ensure_ascii=False, indent=2)
+    prompt_context = "CONTEXTE (JSON):\n" + json.dumps(context, ensure_ascii=False, indent=2, default=str)
     messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt_context}]
     messages.extend(history_messages)
 

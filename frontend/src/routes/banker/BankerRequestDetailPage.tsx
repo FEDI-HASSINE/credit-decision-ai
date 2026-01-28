@@ -1,26 +1,36 @@
 import { useEffect, useState, FormEvent } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { http } from "../../api/http";
 import { AgentPanel } from "../../components/agents/AgentPanel";
 import { AgentChatPanel } from "../../components/agents/AgentChatPanel";
 import { BankerRequest, DecisionCreate } from "../../api/types";
 import { formatCurrency, formatDate, formatDateTime, formatPercent, statusBadgeStyle, statusLabel } from "../../utils/format";
+import { useAuthStore } from "../../features/auth/authStore";
 
-const AGENTS = ["document", "behavior", "similarity", "image", "fraud"];
+const AGENTS = ["document", "behavior", "similarity", "fraud", "decision", "explanation", "final-decision"];
+const AGENT_LABELS: Record<string, string> = {
+  document: "Documents",
+  behavior: "Comportement",
+  similarity: "Similarité",
+  fraud: "Fraude",
+  decision: "Décision",
+  explanation: "Explication",
+  "final-decision": "Décision finale",
+};
 
 export const BankerRequestDetailPage = () => {
   const { id } = useParams();
   const navigate = useNavigate();
+  const { token } = useAuthStore();
+  const { logout } = useAuthStore();
   const [data, setData] = useState<BankerRequest | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [decision, setDecision] = useState<DecisionCreate["decision"]>("approve");
   const [note, setNote] = useState("");
-  const [comment, setComment] = useState("");
   const [selectedAgent, setSelectedAgent] = useState<string>("document");
-  const [uploadFiles, setUploadFiles] = useState<File[]>([]);
-  const [uploading, setUploading] = useState(false);
-  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [noteError, setNoteError] = useState<string | null>(null);
+  const [suggesting, setSuggesting] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
 
   const load = async () => {
@@ -47,45 +57,17 @@ export const BankerRequestDetailPage = () => {
   const submitDecision = async (e: FormEvent) => {
     e.preventDefault();
     if (!id) return;
+    if (decision === "reject" && !note.trim()) {
+      setNoteError("La note est obligatoire en cas de refus.");
+      return;
+    }
+    setNoteError(null);
     try {
       await http.post(`/banker/credit-requests/${id}/decision`, { decision, note });
       setNote("");
       navigate("/banker/requests", { state: { toast: "Décision enregistrée." } });
     } catch (err) {
       setError((err as Error).message);
-    }
-  };
-
-  const submitComment = async (e: FormEvent) => {
-    e.preventDefault();
-    if (!id || !comment.trim()) return;
-    try {
-      await http.post(`/banker/credit-requests/${id}/comments`, { message: comment });
-      setComment("");
-      await load();
-    } catch (err) {
-      setError((err as Error).message);
-    }
-  };
-
-  const uploadDocuments = async () => {
-    if (!id) return;
-    if (uploadFiles.length === 0) {
-      setUploadError("Veuillez sélectionner au moins un fichier.");
-      return;
-    }
-    setUploading(true);
-    setUploadError(null);
-    try {
-      const form = new FormData();
-      uploadFiles.forEach((file) => form.append("files", file));
-      const res = await http.postForm<BankerRequest>(`/banker/credit-requests/${id}/documents`, form);
-      setData(res);
-      setUploadFiles([]);
-    } catch (err) {
-      setUploadError((err as Error).message);
-    } finally {
-      setUploading(false);
     }
   };
 
@@ -99,294 +81,360 @@ export const BankerRequestDetailPage = () => {
   const verdictColor =
     verdict === "approve" ? "#16a34a" : verdict === "reject" ? "#dc2626" : "#f59e0b";
 
-  const allFlags = Array.from(
-    new Set(
-      [
-        data.agents?.document?.flags,
-        data.agents?.behavior?.flags,
-        data.agents?.similarity?.flags,
-        data.agents?.image?.flags,
-        data.agents?.fraud?.flags,
-      ]
-        .flat()
-        .filter((flag): flag is string => typeof flag === "string" && flag.length > 0)
-    )
-  );
+  const fetchSuggestedNote = async (mode: "reject" | "review") => {
+    if (!id) return;
+    setSuggesting(true);
+    try {
+      const res = await http.post<{ note: string }>(`/banker/credit-requests/${id}/decision-suggestion`, {
+        decision: mode,
+      });
+      setNote(res.note || "");
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setSuggesting(false);
+    }
+  };
 
   const refresh = () => {
     setLoading(true);
     load();
   };
 
+  const API_BASE = import.meta.env.VITE_API_URL || "/api";
+
+  const fetchDocumentBlob = async (filename: string) => {
+    const res = await fetch(`${API_BASE}/files/${data?.id}/${encodeURIComponent(filename)}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(text || `HTTP ${res.status}`);
+    }
+    return res.blob();
+  };
+
+  const handleViewDocument = async (filename: string) => {
+    try {
+      const blob = await fetchDocumentBlob(filename);
+      const url = URL.createObjectURL(blob);
+      window.open(url, "_blank", "noopener");
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+
+  const handleDownloadDocument = async (filename: string) => {
+    try {
+      const blob = await fetchDocumentBlob(filename);
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+
+  const selectedAgentData =
+    data?.agents && selectedAgent && selectedAgent !== "final-decision"
+      ? (data.agents as Record<string, typeof data.agents.document | undefined>)[selectedAgent]
+      : undefined;
+
   const installments = data.installments || [];
   const payments = data.payments || [];
   const paymentSummary = data.payment_behavior_summary;
 
   return (
-    <div className="grid" style={{ gap: 12 }}>
-      <div>
-        <button className="button-ghost" type="button" onClick={() => navigate("/banker/requests")}>
-          Retour à la liste
-        </button>
-      </div>
-      <div className="card" style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
-        <strong>Synchronisation</strong>
-        <span style={{ color: "#475569" }}>
-          {lastUpdated ? `Dernière mise à jour: ${formatDateTime(lastUpdated)}` : "Dernière mise à jour: —"}
-        </span>
-        <button className="button-ghost" type="button" onClick={refresh} disabled={loading}>
-          {loading ? "Mise à jour..." : "Rafraîchir"}
-        </button>
-      </div>
-      <div className="card">
-        <h3>Verdict automatique</h3>
-        <div
-          className="badge"
-          style={{ background: verdictColor + "22", color: verdictColor, border: "1px solid " + verdictColor + "55" }}
-        >
-          {verdictLabel}
-        </div>
-        {typeof data.auto_decision_confidence === "number" && (
-          <p style={{ color: "#475569", marginTop: 8 }}>
-            Confiance: {(data.auto_decision_confidence * 100).toFixed(0)}%
-          </p>
-        )}
-        {data.auto_review_required && (
-          <p style={{ marginTop: 6, color: "#b45309" }}>Revue humaine requise.</p>
-        )}
-      </div>
-      <div className="card">
-        <h2>Détail de la demande</h2>
-        <div className="badge" style={statusBadgeStyle(data.status)}>
-          {statusLabel(data.status)}
-        </div>
-        <p style={{ color: "#475569", marginTop: 8 }}>
-          Client {data.client_id} • {data.amount} € • {data.duration_months} mois
-        </p>
-        {data.summary && <p style={{ marginTop: 8 }}>{data.summary}</p>}
-      </div>
-
-      <div className="card">
-        <h3>Profil financier</h3>
-        <div style={{ display: "grid", gap: 6, color: "#475569" }}>
-          <div>Revenus mensuels: {data.monthly_income} €</div>
-          <div>Autres revenus: {data.other_income} €</div>
-          <div>Charges mensuelles: {data.monthly_charges} €</div>
-          <div>Type d'emploi: {data.employment_type}</div>
-          <div>Contrat: {data.contract_type}</div>
-          <div>Ancienneté: {data.seniority_years} ans</div>
-          <div>Statut marital: {data.marital_status}</div>
-          <div>Enfants: {data.number_of_children}</div>
-          <div>Conjoint employé: {String(data.spouse_employed ?? "-")}</div>
-          <div>Logement: {data.housing_status}</div>
-          <div>Titulaire principal: {String(data.is_primary_holder ?? "-")}</div>
-        </div>
-      </div>
-
-      <div className="card">
-        <h3>Documents</h3>
-        {data.documents && data.documents.length > 0 ? (
-          <ul style={{ paddingLeft: 16 }}>
-            {data.documents.map((doc) => (
-              <li key={doc.document_id} style={{ color: "#475569" }}>
-                {doc.document_type}: {doc.file_path}{" "}
-                <a
-                  href={`/api/files/${data.id}/${encodeURIComponent(doc.file_path.split("/").pop() || doc.file_path)}`}
-                  style={{ marginLeft: 6 }}
-                >
-                  Télécharger
-                </a>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p style={{ color: "#475569" }}>Aucun document.</p>
-        )}
-        <div style={{ marginTop: 12, display: "grid", gap: 8 }}>
-          <label>Ajouter des documents</label>
-          <input
-            className="input"
-            type="file"
-            multiple
-            onChange={(e) => setUploadFiles(Array.from(e.target.files || []))}
-          />
+    <div className="banker-detail">
+      <div className="detail-topbar">
+        <Link to="/banker/requests" className="detail-back">
+          ← Retour aux demandes
+        </Link>
+        <div className="detail-topbar-actions">
+          <span>{lastUpdated ? `Dernière mise à jour: ${formatDateTime(lastUpdated)}` : "Dernière mise à jour: —"}</span>
+          <button className="button-ghost" type="button" onClick={refresh} disabled={loading}>
+            {loading ? "Mise à jour..." : "Rafraîchir"}
+          </button>
           <button
-            type="button"
             className="button-ghost"
-            onClick={uploadDocuments}
-            disabled={uploading || uploadFiles.length === 0}
+            type="button"
+            onClick={() => {
+              logout();
+              navigate("/login");
+            }}
           >
-            {uploading ? "Upload..." : "Uploader"}
+            Déconnexion
           </button>
-          {uploadError && <div style={{ color: "#b91c1c", fontSize: 14 }}>{uploadError}</div>}
         </div>
       </div>
 
-      {data.loan && (
-        <div className="card">
-          <h3>Prêt réel</h3>
-          <div style={{ display: "grid", gap: 6, color: "#475569" }}>
-            <div>Montant: {formatCurrency(data.loan.principal_amount)} €</div>
-            <div>Taux: {(data.loan.interest_rate * 100).toFixed(2)}%</div>
-            <div>Durée: {data.loan.term_months} mois</div>
-            <div>Statut: {data.loan.status}</div>
-            <div>Début: {formatDate(data.loan.start_date)}</div>
-            <div>Fin: {formatDate(data.loan.end_date)}</div>
+      <div className="detail-hero">
+        <div>
+          <div className="detail-title-row">
+            <h1>Demande #{data.id}</h1>
+            <span className="badge" style={statusBadgeStyle(data.status)}>
+              {statusLabel(data.status)}
+            </span>
+            {data.auto_review_required && <span className="detail-pill">Revue requise</span>}
           </div>
+          <p className="detail-sub">
+            Client {data.client_id} • Créée le {formatDateTime(data.created_at)} • Mise à jour le{" "}
+            {formatDateTime(data.updated_at)}
+          </p>
+          {data.summary && <p className="detail-summary">{data.summary}</p>}
         </div>
-      )}
-
-      {paymentSummary && (
-        <div className="card">
-          <h3>Résumé comportement de paiement</h3>
-          <div style={{ display: "grid", gap: 6, color: "#475569" }}>
-            <div>Taux à l'heure: {formatPercent(paymentSummary.on_time_rate)}</div>
-            <div>Retard moyen: {paymentSummary.avg_days_late?.toFixed(1)} jours</div>
-            <div>Retard max: {paymentSummary.max_days_late} jours</div>
-            <div>Tranches manquées: {paymentSummary.missed_installments}</div>
-            <div>Dernier paiement: {formatDate(paymentSummary.last_payment_date)}</div>
+        <div className="detail-verdict">
+          <div className="detail-verdict-title">Verdict automatique</div>
+          <div
+            className="badge"
+            style={{ background: verdictColor + "22", color: verdictColor, border: "1px solid " + verdictColor + "55" }}
+          >
+            {verdictLabel}
           </div>
-        </div>
-      )}
-
-      {installments.length > 0 && (
-        <div className="card">
-          <h3>Tranches de paiement</h3>
-          <ul style={{ paddingLeft: 16, color: "#475569" }}>
-            {installments.slice(0, 12).map((inst) => (
-              <li key={inst.installment_id}>
-                #{inst.installment_number} • {formatDate(inst.due_date)} • {formatCurrency(inst.amount_due)} € •{" "}
-                {inst.status}
-                {typeof inst.days_late === "number" && inst.days_late > 0
-                  ? ` (retard ${inst.days_late}j)`
-                  : ""}
-                {inst.amount_paid ? ` • payé ${formatCurrency(inst.amount_paid)} €` : ""}
-              </li>
-            ))}
-          </ul>
-          {installments.length > 12 && (
-            <p style={{ color: "#64748b", marginTop: 8 }}>
-              {installments.length - 12} tranches supplémentaires…
-            </p>
+          {typeof data.auto_decision_confidence === "number" && (
+            <div className="detail-verdict-sub">Confiance: {(data.auto_decision_confidence * 100).toFixed(0)}%</div>
           )}
         </div>
-      )}
+      </div>
 
-      {payments.length > 0 && (
-        <div className="card">
-          <h3>Paiements réels</h3>
-          <ul style={{ paddingLeft: 16, color: "#475569" }}>
-            {payments.slice(0, 12).map((pay) => (
-              <li key={pay.payment_id}>
-                {formatDate(pay.payment_date)} • {formatCurrency(pay.amount)} € • {pay.channel} • {pay.status}
-                {pay.is_reversal ? " (reversal)" : ""}
-              </li>
-            ))}
-          </ul>
-          {payments.length > 12 && (
-            <p style={{ color: "#64748b", marginTop: 8 }}>
-              {payments.length - 12} paiements supplémentaires…
-            </p>
+      <div className="detail-kpis">
+        <div className="detail-kpi-card">
+          <span>Montant demandé</span>
+          <strong>{formatCurrency(data.amount)} €</strong>
+        </div>
+        <div className="detail-kpi-card">
+          <span>Durée</span>
+          <strong>{data.duration_months ?? "—"} mois</strong>
+        </div>
+        <div className="detail-kpi-card">
+          <span>Revenus mensuels</span>
+          <strong>{formatCurrency(data.monthly_income)} €</strong>
+        </div>
+        <div className="detail-kpi-card">
+          <span>Charges mensuelles</span>
+          <strong>{formatCurrency(data.monthly_charges)} €</strong>
+        </div>
+      </div>
+
+      <div className="detail-grid">
+        <div className="card detail-card">
+          <h3>Profil financier</h3>
+          <div className="detail-list">
+            <div>Revenus mensuels: {formatCurrency(data.monthly_income)} €</div>
+            <div>Autres revenus: {formatCurrency(data.other_income)} €</div>
+            <div>Charges mensuelles: {formatCurrency(data.monthly_charges)} €</div>
+            <div>Type d'emploi: {data.employment_type ?? "—"}</div>
+            <div>Contrat: {data.contract_type ?? "—"}</div>
+            <div>Ancienneté: {data.seniority_years ?? "—"} ans</div>
+            <div>Statut marital: {data.marital_status ?? "—"}</div>
+            <div>Enfants: {data.number_of_children ?? "—"}</div>
+            <div>Conjoint employé: {String(data.spouse_employed ?? "-")}</div>
+            <div>Logement: {data.housing_status ?? "—"}</div>
+            <div>Titulaire principal: {String(data.is_primary_holder ?? "-")}</div>
+          </div>
+        </div>
+
+        <div className="card detail-card">
+          <h3>Documents</h3>
+          {data.documents && data.documents.length > 0 ? (
+            <ul className="detail-docs">
+              {data.documents.map((doc) => {
+                const filename = doc.file_path.split("/").pop() || doc.file_path;
+                return (
+                  <li key={doc.document_id}>
+                    <div className="detail-docs-meta">
+                      <span className="detail-docs-name">{filename}</span>
+                      <span className="detail-docs-type">{doc.document_type}</span>
+                    </div>
+                    <div className="detail-docs-actions">
+                      <button
+                        type="button"
+                        className="detail-docs-button"
+                        onClick={() => handleViewDocument(filename)}
+                      >
+                        Voir
+                      </button>
+                      <button
+                        type="button"
+                        className="detail-docs-button ghost"
+                        onClick={() => handleDownloadDocument(filename)}
+                      >
+                        Télécharger
+                      </button>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          ) : (
+            <p className="detail-muted">Aucun document.</p>
           )}
         </div>
-      )}
 
-      <div className="card">
-        <h3>Analyse globale</h3>
-        <p style={{ color: "#475569" }}>
-          {data.summary || "Synthèse indisponible pour le moment."}
-        </p>
-        {allFlags.length > 0 && (
-          <div style={{ marginTop: 8, display: "flex", gap: 6, flexWrap: "wrap" }}>
-            {allFlags.map((flag) => (
-              <span key={flag} className="badge" style={{ background: "#fef3c7", color: "#92400e" }}>
-                {flag}
-              </span>
-            ))}
+        {data.loan && (
+          <div className="card detail-card">
+            <h3>Prêt réel</h3>
+            <div className="detail-list">
+              <div>Montant: {formatCurrency(data.loan.principal_amount)} €</div>
+              <div>Taux: {(data.loan.interest_rate * 100).toFixed(2)}%</div>
+              <div>Durée: {data.loan.term_months} mois</div>
+              <div>Statut: {data.loan.status}</div>
+              <div>Début: {formatDate(data.loan.start_date)}</div>
+              <div>Fin: {formatDate(data.loan.end_date)}</div>
+            </div>
           </div>
         )}
-      </div>
 
-      {data.agents?.decision && <AgentPanel title="Agent Décision" agent={data.agents.decision} />}
-      {data.agents?.document && <AgentPanel title="Agent Documents" agent={data.agents.document} />}
-      {data.agents?.similarity && <AgentPanel title="Agent Similarité" agent={data.agents.similarity} />}
-      {data.agents?.behavior && <AgentPanel title="Agent Comportement" agent={data.agents.behavior} />}
-      {data.agents?.image && <AgentPanel title="Agent Image" agent={data.agents.image} />}
-      {data.agents?.fraud && <AgentPanel title="Agent Fraude" agent={data.agents.fraud} />}
+        {paymentSummary && (
+          <div className="card detail-card">
+            <h3>Résumé comportement de paiement</h3>
+            <div className="detail-list">
+              <div>Taux à l'heure: {formatPercent(paymentSummary.on_time_rate)}</div>
+              <div>Retard moyen: {paymentSummary.avg_days_late?.toFixed(1)} jours</div>
+              <div>Retard max: {paymentSummary.max_days_late} jours</div>
+              <div>Tranches manquées: {paymentSummary.missed_installments}</div>
+              <div>Dernier paiement: {formatDate(paymentSummary.last_payment_date)}</div>
+            </div>
+          </div>
+        )}
 
-      <div className="card">
-        <h3>Décision</h3>
-        {data.decision ? (
-          <>
-            <div className="badge">{data.decision.decision}</div>
-            {data.decision.note && <p style={{ marginTop: 8 }}>{data.decision.note}</p>}
-            {data.decision.decided_at && (
-              <p style={{ color: "#475569", marginTop: 8 }}>
-                Décidé le {new Date(data.decision.decided_at).toLocaleString()}
-              </p>
+        {installments.length > 0 && (
+          <div className="card detail-card">
+            <h3>Tranches de paiement</h3>
+            <ul className="detail-list">
+              {installments.slice(0, 12).map((inst) => (
+                <li key={inst.installment_id}>
+                  #{inst.installment_number} • {formatDate(inst.due_date)} • {formatCurrency(inst.amount_due)} € •{" "}
+                  {inst.status}
+                  {typeof inst.days_late === "number" && inst.days_late > 0
+                    ? ` (retard ${inst.days_late}j)`
+                    : ""}
+                  {inst.amount_paid ? ` • payé ${formatCurrency(inst.amount_paid)} €` : ""}
+                </li>
+              ))}
+            </ul>
+            {installments.length > 12 && (
+              <p className="detail-muted">{installments.length - 12} tranches supplémentaires…</p>
             )}
-          </>
-        ) : (
-          <p style={{ color: "#475569" }}>Aucune décision pour le moment.</p>
+          </div>
         )}
-        <form onSubmit={submitDecision} className="grid" style={{ gap: 8, marginTop: 12 }}>
-          <label>Choisir une décision</label>
-          <select className="input" value={decision} onChange={(e) => setDecision(e.target.value as DecisionCreate["decision"])}>
-            <option value="approve">Approuver</option>
-            <option value="reject">Refuser</option>
-            <option value="review">Revoir</option>
-          </select>
-          <label>Note</label>
-          <textarea className="input" value={note} onChange={(e) => setNote(e.target.value)} rows={3} />
-          <button className="button-primary" type="submit">
-            Enregistrer la décision
-          </button>
-        </form>
+
+        {payments.length > 0 && (
+          <div className="card detail-card">
+            <h3>Paiements réels</h3>
+            <ul className="detail-list">
+              {payments.slice(0, 12).map((pay) => (
+                <li key={pay.payment_id}>
+                  {formatDate(pay.payment_date)} • {formatCurrency(pay.amount)} € • {pay.channel} • {pay.status}
+                  {pay.is_reversal ? " (reversal)" : ""}
+                </li>
+              ))}
+            </ul>
+            {payments.length > 12 && (
+              <p className="detail-muted">{payments.length - 12} paiements supplémentaires…</p>
+            )}
+          </div>
+        )}
+
       </div>
 
-      <div className="card">
-        <h3>Commentaires</h3>
-        {data.comments && data.comments.length > 0 ? (
-          <ul style={{ paddingLeft: 16 }}>
-            {data.comments.map((c, idx) => (
-              <li key={`${c.created_at}-${idx}`} style={{ color: "#475569", marginBottom: 8 }}>
-                <strong>{c.author_id}</strong>: {c.message}
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p style={{ color: "#475569" }}>Aucun commentaire.</p>
-        )}
-        <form onSubmit={submitComment} style={{ marginTop: 12 }}>
-          <label>Ajouter un commentaire</label>
-          <textarea className="input" value={comment} onChange={(e) => setComment(e.target.value)} rows={3} />
-          <button className="button-ghost" type="submit" style={{ marginTop: 8 }}>
-            Ajouter le commentaire
-          </button>
-        </form>
-      </div>
-
-      <div className="card">
-        <h3>Discuter avec un agent</h3>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+      <div className="detail-section">
+        <div className="detail-section-header">
+          <h2>Agents</h2>
+          <p>Ouvrez un agent pour consulter l'analyse et discuter.</p>
+        </div>
+        <div className="detail-tabs">
           {AGENTS.map((agent) => (
             <button
               key={agent}
               type="button"
-              className="button-primary"
-              style={{
-                background: selectedAgent === agent ? "#0f172a" : "#e2e8f0",
-                color: selectedAgent === agent ? "#fff" : "#0f172a",
-              }}
+              className={`detail-tab ${selectedAgent === agent ? "active" : ""}`}
               onClick={() => setSelectedAgent(agent)}
             >
-              {agent}
+              {AGENT_LABELS[agent] ?? agent}
             </button>
           ))}
         </div>
+        <div className="detail-agent-grid">
+          <div className="detail-agent-pane">
+            {selectedAgent === "final-decision" ? (
+              <div className="card detail-card">
+                <h3>Décision finale</h3>
+                {data.decision ? (
+                  <>
+                    <div className="badge">{data.decision.decision}</div>
+                    {data.decision.note && <p style={{ marginTop: 8 }}>{data.decision.note}</p>}
+                    {data.decision.decided_at && (
+                      <p className="detail-muted">Décidé le {new Date(data.decision.decided_at).toLocaleString()}</p>
+                    )}
+                  </>
+                ) : (
+                  <p className="detail-muted">Aucune décision pour le moment.</p>
+                )}
+                <form onSubmit={submitDecision} className="grid" style={{ gap: 8, marginTop: 12 }}>
+                  <label>Choisir une décision</label>
+            <select
+              className="input"
+              value={decision}
+              onChange={(e) => {
+                setDecision(e.target.value as DecisionCreate["decision"]);
+                setNoteError(null);
+              }}
+            >
+              <option value="approve">Approuver</option>
+              <option value="reject">Refuser</option>
+              <option value="review">Revoir</option>
+            </select>
+            <label>Note</label>
+            <textarea className="input" value={note} onChange={(e) => setNote(e.target.value)} rows={3} />
+            {noteError && <div style={{ color: "#b91c1c", fontSize: 14 }}>{noteError}</div>}
+            {decision === "reject" && (
+              <button
+                className="button-ghost"
+                type="button"
+                onClick={() => fetchSuggestedNote("reject")}
+                style={{ justifySelf: "start" }}
+                disabled={suggesting}
+              >
+                {suggesting ? "Suggestion..." : "Suggérer une cause (AI)"}
+              </button>
+            )}
+            {decision === "review" && (
+              <button
+                className="button-ghost"
+                type="button"
+                onClick={() => fetchSuggestedNote("review")}
+                style={{ justifySelf: "start" }}
+                disabled={suggesting}
+              >
+                {suggesting ? "Suggestion..." : "Suggérer des actions (AI)"}
+              </button>
+            )}
+            <button className="button-primary" type="submit">
+              Enregistrer la décision
+            </button>
+                </form>
+              </div>
+            ) : selectedAgentData ? (
+              <AgentPanel title={`Agent ${AGENT_LABELS[selectedAgent] ?? selectedAgent}`} agent={selectedAgentData} />
+            ) : (
+              <div className="card detail-card">
+                <h3>Analyse indisponible</h3>
+                <p className="detail-muted">Aucune donnée pour cet agent pour le moment.</p>
+              </div>
+            )}
+          </div>
+          <div className="detail-agent-pane">
+            {selectedAgent === "final-decision" ? null : id && <AgentChatPanel requestId={id} agentName={selectedAgent} />}
+          </div>
+        </div>
       </div>
-
-      {id && <AgentChatPanel requestId={id} agentName={selectedAgent} />}
     </div>
   );
 };

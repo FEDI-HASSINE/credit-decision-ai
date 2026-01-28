@@ -124,7 +124,15 @@ export const AgentPanel = ({ title, agent }: Props) => {
     | { summary?: string; main_reasons?: string[]; next_steps?: string[] }
     | undefined;
   const internal = explanations?.internal_explanation as
-    | { summary?: string; main_reasons?: string[]; next_steps?: string[] }
+    | {
+        summary?: string;
+        main_reasons?: string[];
+        key_factors?: string[];
+        supporting_signals?: string[];
+        next_steps?: string[];
+        payment_history?: string;
+        risk_level?: string;
+      }
     | undefined;
   const customerSummary = typeof customer?.summary === "string" ? customer.summary : undefined;
   const internalSummary = typeof internal?.summary === "string" ? internal.summary : undefined;
@@ -165,6 +173,37 @@ export const AgentPanel = ({ title, agent }: Props) => {
       Boolean(similarityAnalysis));
   const showDecisionDetails = agentName === "decision" && Boolean(decisionDetails);
   const showDocumentDetails = agentName === "document" && Boolean(documentDetails);
+  const isExplanationAgent = agentName === "explanation" || title.toLowerCase().includes("explication");
+  const translateExplanationText = (text: string) => {
+    const trimmed = text.trim();
+    const translations: Record<string, string> = {
+      "Document checks surfaced inconsistencies requiring manual review.":
+        "Les documents présentent des incohérences qui nécessitent une revue manuelle.",
+      "Similar past cases exhibited higher observed default probability.":
+        "Des cas similaires ont montré une probabilité de défaut plus élevée.",
+      "Repayment history shows recurring delays or missed installments.":
+        "L’historique de remboursement montre des retards récurrents ou des échéances manquées.",
+      "History: frequent delays or missed installments.":
+        "Historique : retards fréquents ou échéances manquées.",
+    };
+    if (translations[trimmed]) return translations[trimmed];
+    const codeMap: Record<string, string> = {
+      DOC_INCONSISTENCY: "Incohérences documentaires",
+      PEER_RISK_HIGH: "Risque élevé observé sur des profils similaires",
+      PAYMENT_HISTORY_POOR: "Historique de paiement défavorable",
+      MISSING_KEY_FIELDS: "Champs clés manquants",
+      MISSING_DOCUMENTS: "Documents manquants",
+      PAYMENT_HISTORY_WEAK: "Historique de paiement faible",
+      PEER_DEFAULT_RATE_HIGH: "Taux de défaut élevé chez les profils similaires",
+      PEER_FRAUD_RATE_HIGH: "Taux de fraude élevé chez les profils similaires",
+      LOW_ON_TIME_RATE: "Faible taux de paiements à l’heure",
+      LATE_PAYMENTS_AVG: "Retards moyens élevés",
+      RECOMMENDATION: "Recommandation",
+      APPROUVER_AVEC_CONDITIONS: "Approuver avec conditions",
+    };
+    if (codeMap[trimmed]) return codeMap[trimmed];
+    return trimmed;
+  };
   const hasReadableSummary =
     Boolean(explanations?.global_summary) ||
     Boolean(customerSummary) ||
@@ -179,6 +218,72 @@ export const AgentPanel = ({ title, agent }: Props) => {
     !(agentName === "decision" && decisionDetails?.summary) &&
     !(agentName === "document" && showDocumentDetails);
 
+  const cleanLLMText = (value?: string) => {
+    if (!value) return value;
+    let cleaned = value.replace(/```json|```/gi, "").replace(/^Réponse\s*:\s*/i, "").trim();
+    const jsonMatch = cleaned.match(/\{[\s\S]*\}$/);
+    if (jsonMatch) {
+      try {
+        const parsed = JSON.parse(jsonMatch[0]);
+        if (parsed && typeof parsed === "object") {
+          if (parsed.global_summary) return String(parsed.global_summary);
+        }
+      } catch {
+        // keep cleaned string
+      }
+    }
+    return cleaned;
+  };
+
+  const resolveFlagExplanation = (flag: string, value: unknown) => {
+    if (typeof value === "string") {
+      const cleaned = value.replace(/```json|```/gi, "").replace(/^Réponse\s*:\s*/i, "").trim();
+      const jsonMatch = cleaned.match(/\{[\s\S]*\}$/);
+      if (jsonMatch) {
+        try {
+          const parsed = JSON.parse(jsonMatch[0]);
+          const map = parsed?.flag_explanations;
+          if (map && typeof map === "object" && flag in map) {
+            return String(map[flag]);
+          }
+          if (parsed?.global_summary) return String(parsed.global_summary);
+        } catch {
+          // ignore parse errors
+        }
+      }
+      return cleaned;
+    }
+    return String(value ?? "");
+  };
+
+  const getLlmStatus = () => {
+    if (agentName === "image" || agentName === "decision") return "inactif";
+    const haystack = JSON.stringify(explanations || "").toLowerCase();
+    if (
+      haystack.includes("llm non disponible") ||
+      haystack.includes("llm indisponible") ||
+      haystack.includes("llm non configure") ||
+      haystack.includes("llm non configuré")
+    ) {
+      return "inactif";
+    }
+    if (haystack.trim().length === 0) return "inconnu";
+    return "actif";
+  };
+  const llmStatus = getLlmStatus();
+
+  const formatExplanationItem = (value: unknown) => {
+    if (typeof value === "string") return value;
+    if (value && typeof value === "object") {
+      const obj = value as { description?: string; reason_code?: string; source?: string };
+      if (obj.description) return obj.description;
+      if (obj.reason_code) return obj.reason_code;
+      if (obj.source) return obj.source;
+      return JSON.stringify(obj);
+    }
+    return String(value ?? "");
+  };
+
   return (
     <div className="card">
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -186,6 +291,15 @@ export const AgentPanel = ({ title, agent }: Props) => {
         {typeof agent.score === "number" && (
           <span className="badge">Score: {agent.score.toFixed(2)}</span>
         )}
+        <span
+          className="badge"
+          style={{
+            background: llmStatus === "actif" ? "#dcfce7" : llmStatus === "inactif" ? "#fee2e2" : "#e2e8f0",
+            color: llmStatus === "actif" ? "#166534" : llmStatus === "inactif" ? "#991b1b" : "#475569",
+          }}
+        >
+          LLM {llmStatus}
+        </span>
         {typeof agent.confidence === "number" && (
           <span className="badge" style={{ background: "#dbeafe", color: "#1e3a8a" }}>
             Confiance: {(agent.confidence * 100).toFixed(0)}%
@@ -206,6 +320,74 @@ export const AgentPanel = ({ title, agent }: Props) => {
       )}
       {showGlobalSummary && (
         <p style={{ marginTop: 8, color: "#475569" }}>{explanations?.global_summary}</p>
+      )}
+      {isExplanationAgent && (
+        <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
+          {customerSummary && (
+            <div>
+              <strong>Résumé client</strong>
+              <p style={{ marginTop: 6, color: "#475569" }}>{translateExplanationText(customerSummary)}</p>
+            </div>
+          )}
+          {customer?.main_reasons && customer.main_reasons.length > 0 && (
+            <div>
+              <strong>Raisons principales (client)</strong>
+              <ul style={{ paddingLeft: 16, color: "#475569", marginTop: 6 }}>
+                {customer.main_reasons.map((reason, idx) => (
+                  <li key={`customer-reason-${idx}`}>{translateExplanationText(formatExplanationItem(reason))}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {customer?.next_steps && customer.next_steps.length > 0 && (
+            <div>
+              <strong>Prochaines étapes suggérées (client)</strong>
+              <ul style={{ paddingLeft: 16, color: "#475569", marginTop: 6 }}>
+                {customer.next_steps.map((step, idx) => (
+                  <li key={`customer-step-${idx}`}>{translateExplanationText(formatExplanationItem(step))}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {internal && (
+            <div>
+              <strong>Résumé interne (banquier)</strong>
+              {internal.summary && (
+                <p style={{ marginTop: 6, color: "#475569" }}>{translateExplanationText(internal.summary)}</p>
+              )}
+              {internal.key_factors && internal.key_factors.length > 0 && (
+                <>
+                  <div style={{ marginTop: 8, fontWeight: 600, color: "#0f172a" }}>Facteurs clés</div>
+                  <ul style={{ paddingLeft: 16, color: "#475569", marginTop: 6 }}>
+                    {internal.key_factors.map((factor, idx) => (
+                      <li key={`internal-factor-${idx}`}>{translateExplanationText(formatExplanationItem(factor))}</li>
+                    ))}
+                  </ul>
+                </>
+              )}
+              {internal.supporting_signals && internal.supporting_signals.length > 0 && (
+                <>
+                  <div style={{ marginTop: 8, fontWeight: 600, color: "#0f172a" }}>Signaux de support</div>
+                  <ul style={{ paddingLeft: 16, color: "#475569", marginTop: 6 }}>
+                    {internal.supporting_signals.map((signal, idx) => (
+                      <li key={`internal-signal-${idx}`}>{translateExplanationText(formatExplanationItem(signal))}</li>
+                    ))}
+                  </ul>
+                </>
+              )}
+              {internal.payment_history && (
+                <p style={{ marginTop: 6, color: "#475569" }}>
+                  Historique de paiement : {translateExplanationText(internal.payment_history)}
+                </p>
+              )}
+              {internal.risk_level && (
+                <p style={{ marginTop: 6, color: "#475569" }}>
+                  Niveau de risque estimé : {translateExplanationText(internal.risk_level)}
+                </p>
+              )}
+            </div>
+          )}
+        </div>
       )}
       {showSimilarityDetails && (
         <div style={{ marginTop: 12 }}>
@@ -498,9 +680,9 @@ export const AgentPanel = ({ title, agent }: Props) => {
       )}
       {showDocumentDetails && (
         <div style={{ marginTop: 12 }}>
-          <strong>Synthèse documentaire:</strong>
+          <strong>Analyse documentaire</strong>
           <p style={{ color: "#475569", marginTop: 6 }}>
-            {explanations?.global_summary ||
+            {cleanLLMText(explanations?.global_summary) ||
               `Cohérence ${formatConsistency(documentDetails?.consistency_level)}. Analyse des documents réalisée.`}
           </p>
           <div style={{ display: "grid", gap: 6, marginTop: 8, color: "#475569" }}>
@@ -542,6 +724,18 @@ export const AgentPanel = ({ title, agent }: Props) => {
               </ul>
             </div>
           )}
+          {flagEntries.length > 0 && (
+            <div style={{ marginTop: 8 }}>
+              <strong>Explications détaillées:</strong>
+              <ul style={{ paddingLeft: 16 }}>
+                {flagEntries.map(([flag, desc]) => (
+                  <li key={flag} style={{ color: "#475569" }}>
+                    <strong>{getFlagLabel(flag, "document")}:</strong> {resolveFlagExplanation(flag, desc)}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
       )}
       {customerSummary && (
@@ -566,7 +760,7 @@ export const AgentPanel = ({ title, agent }: Props) => {
           <strong>Interne:</strong> {internalSummary}
         </div>
       )}
-      {flagEntries.length > 0 && (
+      {flagEntries.length > 0 && !showDocumentDetails && (
         <div style={{ marginTop: 8 }}>
           <strong>Détails:</strong>
           <ul style={{ paddingLeft: 16 }}>

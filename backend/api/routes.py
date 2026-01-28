@@ -46,6 +46,7 @@ from core.db import (
     get_agent_session,
     upsert_agent_session,
     ensure_agent_session_snapshot,
+    resubmit_credit_request_db,
 )
 from agents.chat_agent import generate_agent_reply, build_initial_agent_reply
 
@@ -306,6 +307,7 @@ def _build_agents_raw(detail: Dict[str, Any]) -> Dict[str, Any]:
         "behavior": "behavior_agent",
         "fraud": "fraud_agent",
         "image": "image_agent",
+        "explanation": "explanation_agent",
     }
     agents_raw: Dict[str, Any] = {}
     for row in detail.get("agent_outputs", []) or []:
@@ -335,7 +337,7 @@ def _build_chat_snapshot(detail: Dict[str, Any]) -> Dict[str, Any]:
 def _prime_agent_sessions(detail: Dict[str, Any]) -> None:
     case_id = int(detail["case_id"])
     snapshot = _build_chat_snapshot(detail)
-    for agent_name in ("document", "behavior", "similarity", "fraud", "image", "decision"):
+    for agent_name in ("document", "behavior", "similarity", "fraud", "image", "decision", "explanation"):
         ensure_agent_session_snapshot(case_id, agent_name, snapshot)
 
 
@@ -581,6 +583,74 @@ def get_credit_request(req_id: str, user=Depends(get_current_user)):
     )
 
 
+@router.post("/client/credit-requests/{req_id}/resubmit", response_model=CreditRequest)
+async def resubmit_credit_request(
+    req_id: str,
+    user=Depends(get_current_user),
+    payload: str = Form(...),
+    files: Optional[List[UploadFile]] = File(default=None),
+):
+    _require_role(user, "client")
+    payload_data = _parse_json_field(payload)
+    if not isinstance(payload_data, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload")
+
+    stored_documents: List[Dict[str, str]] = []
+    if files:
+        stored_documents = await _store_files(int(req_id), files)
+        if stored_documents:
+            add_case_documents(int(req_id), stored_documents)
+
+    documents_payloads = [
+        {
+            "doc_type": doc.get("document_type"),
+            "raw_text": doc.get("raw_text") or "",
+            "filename": doc.get("filename"),
+        }
+        for doc in stored_documents
+    ]
+
+    payload_data = {
+        **payload_data,
+        "documents": payload_data.get("documents") or [doc.get("filename") for doc in stored_documents],
+        "documents_payloads": documents_payloads,
+    }
+
+    updated = resubmit_credit_request_db(int(req_id), int(user["user_id"]), payload_data)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Credit request not found")
+
+    orchestration = run_orchestrator({**payload_data, "case_id": int(req_id), "user_id": user["user_id"]})
+    save_orchestration(int(req_id), orchestration)
+    banker_detail = fetch_case_detail(int(req_id))
+    if banker_detail:
+        _prime_agent_sessions(banker_detail)
+
+    detail = fetch_case_detail_for_client(int(req_id), user["user_id"])
+    if not detail:
+        raise HTTPException(status_code=500, detail="Failed to resubmit request")
+    decision_info = _map_decision(detail.get("decision"))
+    return CreditRequest(
+        id=str(detail["case_id"]),
+        status=_map_status(detail["status"], detail.get("decision")),
+        created_at=detail["created_at"],
+        updated_at=detail["updated_at"],
+        client_id=str(detail["user_id"]),
+        summary=detail.get("summary") or "Dossier mis à jour",
+        customer_explanation=None,
+        agents=_map_agent_outputs(detail.get("agent_outputs", [])),
+        decision=decision_info,
+        comments=_map_comments(detail.get("comments", [])),
+        auto_decision=detail.get("auto_decision"),
+        auto_decision_confidence=float(detail["auto_decision_confidence"]) if detail.get("auto_decision_confidence") is not None else None,
+        auto_review_required=detail.get("auto_review_required"),
+        loan=_map_loan(detail.get("loan")),
+        installments=_map_installments(detail.get("installments", [])),
+        payments=_map_payments(detail.get("payments", [])),
+        payment_behavior_summary=_map_payment_summary(detail.get("payment_behavior_summary")),
+    )
+
+
 @router.get("/client/credit-requests", response_model=list[CreditRequest])
 def list_client_requests(user=Depends(get_current_user)):
     _require_role(user, "client")
@@ -793,3 +863,75 @@ def rerun_agents(req_id: str, _: Dict = Depends(get_current_user)):
         _prime_agent_sessions(refreshed)
     agents = result.get("agents") or None
     return {"status": "ok", "agents": agents}
+
+
+@router.post("/banker/credit-requests/{req_id}/decision-suggestion")
+def suggest_decision_note(req_id: str, body: Dict[str, Any] = None, _: Dict = Depends(get_current_user)):
+    detail = fetch_case_detail(int(req_id))
+    if not detail:
+        raise HTTPException(status_code=404, detail="Credit request not found")
+    snapshot = _build_chat_snapshot(detail)
+    decision_mode = (body or {}).get("decision") or "reject"
+    reply = generate_agent_reply("explanation", snapshot, [])
+    raw = str(reply.get("summary") or "").strip()
+    cleaned = " ".join(raw.split())
+
+    def _fmt(value: Any, suffix: str = "") -> str:
+        if value is None:
+            return "—"
+        return f"{value}{suffix}"
+
+    amount = _fmt(snapshot.get("amount") if isinstance(snapshot, dict) else None, " €")
+    duration = _fmt(snapshot.get("duration_months") if isinstance(snapshot, dict) else None, " mois")
+    income = _fmt(snapshot.get("monthly_income") if isinstance(snapshot, dict) else None, " €")
+    charges = _fmt(snapshot.get("monthly_charges") if isinstance(snapshot, dict) else None, " €")
+    employment = _fmt(snapshot.get("employment_type") if isinstance(snapshot, dict) else None)
+    contract = _fmt(snapshot.get("contract_type") if isinstance(snapshot, dict) else None)
+    seniority = _fmt(snapshot.get("seniority_years") if isinstance(snapshot, dict) else None, " ans")
+
+    expl = snapshot.get("agents", {}).get("explanation", {}) if isinstance(snapshot, dict) else {}
+    explanations = expl.get("explanations", {}) if isinstance(expl, dict) else {}
+    internal = explanations.get("internal_explanation", {}) if isinstance(explanations, dict) else {}
+    key_factors = internal.get("key_factors") or []
+    supporting = internal.get("supporting_signals") or []
+
+    parts: List[str] = []
+    if decision_mode == "review":
+        parts.append(
+            "Votre dossier est en cours de revue. Merci de mettre à jour les informations ci-dessous ou d'ajouter les documents demandés pour poursuivre l'analyse."
+        )
+    if cleaned:
+        parts.append(cleaned)
+    parts.append(
+        "Détails du dossier: revenu mensuel "
+        + income
+        + ", charges mensuelles "
+        + charges
+        + ", emploi "
+        + employment
+        + ", contrat "
+        + contract
+        + ", ancienneté "
+        + seniority
+        + ", montant demandé "
+        + amount
+        + " sur "
+        + duration
+        + "."
+    )
+    if isinstance(key_factors, list) and key_factors:
+        parts.append("Facteurs clés: " + ", ".join([str(x) for x in key_factors]))
+    if isinstance(supporting, list) and supporting:
+        parts.append("Signaux de support: " + ", ".join([str(x) for x in supporting]))
+
+    if not cleaned and decision_mode != "review":
+        parts.insert(
+            0,
+            "Votre demande est en cours de revue. Des incohérences ou des éléments manquants doivent être clarifiés avant décision.",
+        )
+    if decision_mode == "review":
+        parts.append(
+            "Recommandations: vérifier le montant et la durée du prêt, confirmer les revenus et charges, et joindre les pièces manquantes (ex: justificatif de revenus, contrat, relevés bancaires)."
+        )
+    note = " ".join([p for p in parts if p])
+    return {"note": note}
