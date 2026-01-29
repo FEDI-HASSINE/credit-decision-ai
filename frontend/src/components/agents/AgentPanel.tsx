@@ -257,7 +257,19 @@ export const AgentPanel = ({ title, agent }: Props) => {
   };
 
   const getLlmStatus = () => {
-    if (agentName === "image" || agentName === "decision") return "inactif";
+    if (agentName === "image") return "inactif";
+    if (agentName === "decision") {
+      const decisionSummary =
+        typeof explanations?.decision_details?.summary === "string"
+          ? explanations.decision_details.summary
+          : undefined;
+      if (decisionSummary) {
+        const normalized = decisionSummary.toLowerCase();
+        if (normalized.startsWith("recommandation:") && normalized.includes("raisons principales")) {
+          return "inactif";
+        }
+      }
+    }
     const haystack = JSON.stringify(explanations || "").toLowerCase();
     if (
       haystack.includes("llm non disponible") ||
