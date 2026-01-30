@@ -20,6 +20,11 @@ class LoginResponse(BaseModel):
     user_id: str
 
 
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+
+
 class CreditRequestCreate(BaseModel):
     amount: float
     duration_months: int

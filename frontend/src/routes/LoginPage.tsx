@@ -2,7 +2,7 @@ import { FormEvent, useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { useAuthStore } from "../features/auth/authStore";
 import { http } from "../api/http";
-import { LoginRequest, LoginResponse } from "../api/types";
+import { LoginRequest, LoginResponse, RegisterRequest } from "../api/types";
 
 export const LoginPage = () => {
   const navigate = useNavigate();
@@ -12,6 +12,12 @@ export const LoginPage = () => {
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showRegister, setShowRegister] = useState(false);
+  const [registerEmail, setRegisterEmail] = useState("");
+  const [registerPassword, setRegisterPassword] = useState("");
+  const [registerPasswordConfirm, setRegisterPasswordConfirm] = useState("");
+  const [registering, setRegistering] = useState(false);
+  const [registerError, setRegisterError] = useState<string | null>(null);
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -27,6 +33,27 @@ export const LoginPage = () => {
       setError((err as Error).message);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const onRegister = async (e: FormEvent) => {
+    e.preventDefault();
+    setRegistering(true);
+    setRegisterError(null);
+    if (registerPassword !== registerPasswordConfirm) {
+      setRegisterError("Les mots de passe ne correspondent pas.");
+      setRegistering(false);
+      return;
+    }
+    try {
+      const payload: RegisterRequest = { email: registerEmail, password: registerPassword };
+      const res = await http.post<LoginResponse>("/auth/register", payload, { auth: false });
+      setAuth({ token: res.token, role: res.role, userId: res.user_id });
+      navigate("/client/requests", { replace: true });
+    } catch (err) {
+      setRegisterError((err as Error).message);
+    } finally {
+      setRegistering(false);
     }
   };
 
@@ -89,7 +116,86 @@ export const LoginPage = () => {
               {loading ? "Connexion..." : "Se connecter"}
             </button>
           </form>
+          <button
+            className="login-secondary-button"
+            type="button"
+            onClick={() => setShowRegister((prev) => !prev)}
+          >
+            {showRegister ? "Déjà un compte ? Se connecter" : "Nouveau client ? Créer un compte"}
+          </button>
         </div>
+
+        {showRegister && (
+          <div className="login-card login-card-secondary">
+            <h2>Créer un compte client</h2>
+            <p className="login-subtitle">Créez un compte pour déposer une demande.</p>
+            <form className="login-form" onSubmit={onRegister}>
+              <div className="login-field">
+                <label htmlFor="register-email">Email</label>
+                <div className="login-input-wrapper">
+                  <span className="login-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
+                      <path d="M4 6h16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2Z" />
+                      <path d="m4 8 8 5 8-5" />
+                    </svg>
+                  </span>
+                  <input
+                    id="register-email"
+                    className="login-input"
+                    value={registerEmail}
+                    onChange={(e) => setRegisterEmail(e.target.value)}
+                    placeholder="client@exemple.com"
+                    required
+                  />
+                </div>
+              </div>
+              <div className="login-field">
+                <label htmlFor="register-password">Mot de passe</label>
+                <div className="login-input-wrapper">
+                  <span className="login-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
+                      <path d="M16 10V7a4 4 0 0 0-8 0v3" />
+                      <rect x="4" y="10" width="16" height="10" rx="2" />
+                    </svg>
+                  </span>
+                  <input
+                    id="register-password"
+                    className="login-input"
+                    type="password"
+                    value={registerPassword}
+                    onChange={(e) => setRegisterPassword(e.target.value)}
+                    placeholder="Minimum 6 caractères"
+                    required
+                  />
+                </div>
+              </div>
+              <div className="login-field">
+                <label htmlFor="register-password-confirm">Confirmer le mot de passe</label>
+                <div className="login-input-wrapper">
+                  <span className="login-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
+                      <path d="M16 10V7a4 4 0 0 0-8 0v3" />
+                      <rect x="4" y="10" width="16" height="10" rx="2" />
+                    </svg>
+                  </span>
+                  <input
+                    id="register-password-confirm"
+                    className="login-input"
+                    type="password"
+                    value={registerPasswordConfirm}
+                    onChange={(e) => setRegisterPasswordConfirm(e.target.value)}
+                    placeholder="Répétez le mot de passe"
+                    required
+                  />
+                </div>
+              </div>
+              {registerError && <div className="login-error">{registerError}</div>}
+              <button className="login-button" type="submit" disabled={registering}>
+                {registering ? "Création..." : "Créer un compte"}
+              </button>
+            </form>
+          </div>
+        )}
 
         <p className="login-footer">Propulsé par l'analyse multi-agent</p>
       </div>

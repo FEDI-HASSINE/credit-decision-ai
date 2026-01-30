@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse
 from api.schemas import (
     LoginRequest,
     LoginResponse,
+    RegisterRequest,
     CreditRequestCreate,
     CreditRequest,
     BankerRequest,
@@ -35,6 +36,7 @@ from api.deps import get_current_user
 from core.orchestrator import run_orchestrator
 from core.db import (
     fetch_user_by_email,
+    create_user as create_user_db,
     create_credit_request as create_credit_request_db,
     list_cases_for_banker,
     fetch_case_detail,
@@ -496,6 +498,23 @@ def _build_banker_request(detail: Dict[str, Any]) -> BankerRequest:
 
 
 # --- Auth ---------------------------------------------------------------------
+@router.post("/auth/register", response_model=LoginResponse)
+def register(body: RegisterRequest):
+    email = body.email.strip().lower()
+    password = body.password.strip()
+    if not email or not password:
+        raise HTTPException(status_code=400, detail="Email and password are required")
+    if len(password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    if fetch_user_by_email(email):
+        raise HTTPException(status_code=409, detail="Email already registered")
+
+    user = create_user_db(email, password, "CLIENT")
+    user_id = int(user["user_id"])
+    token = f"token:client:{user_id}:{uuid4()}"
+    return LoginResponse(token=token, role="client", user_id=str(user_id))
+
+
 @router.post("/auth/login", response_model=LoginResponse)
 def login(body: LoginRequest):
     email = body.email.strip().lower()
@@ -550,20 +569,29 @@ def create_credit_request(body: CreditRequestCreate, user=Depends(get_current_us
     if not detail:
         raise HTTPException(status_code=500, detail="Failed to create request")
     decision_info = _map_decision(detail.get("decision"))
+    summary = detail.get("summary") or "Votre dossier a été créé et est en cours d'analyse."
+    if decision_info:
+        summary = (
+            "Votre demande a été accapté."
+            if decision_info.decision == "approve"
+            else "Votre demande a été refusé."
+            if decision_info.decision == "reject"
+            else "Votre demande est en cours de revue."
+        )
     return CreditRequest(
         id=str(detail["case_id"]),
         status=_map_status(detail["status"], detail.get("decision")),
         created_at=detail["created_at"],
         updated_at=detail["updated_at"],
         client_id=str(detail["user_id"]),
-        summary=detail.get("summary") or "Dossier créé",
+        summary=summary,
         customer_explanation=None,
-        agents=_map_agent_outputs(detail.get("agent_outputs", [])),
+        agents=None,
         decision=decision_info,
-        comments=_map_comments(detail.get("comments", [])),
-        auto_decision=detail.get("auto_decision"),
-        auto_decision_confidence=float(detail["auto_decision_confidence"]) if detail.get("auto_decision_confidence") is not None else None,
-        auto_review_required=detail.get("auto_review_required"),
+        comments=[],
+        auto_decision=None,
+        auto_decision_confidence=None,
+        auto_review_required=None,
         loan=_map_loan(detail.get("loan")),
         installments=_map_installments(detail.get("installments", [])),
         payments=_map_payments(detail.get("payments", [])),
@@ -617,20 +645,29 @@ async def create_credit_request_upload(
     if not detail:
         raise HTTPException(status_code=500, detail="Failed to create request")
     decision_info = _map_decision(detail.get("decision"))
+    summary = detail.get("summary") or "Votre dossier a été créé et est en cours d'analyse."
+    if decision_info:
+        summary = (
+            "Votre demande a été accapté."
+            if decision_info.decision == "approve"
+            else "Votre demande a été refusé."
+            if decision_info.decision == "reject"
+            else "Votre demande est en cours de revue."
+        )
     return CreditRequest(
         id=str(detail["case_id"]),
         status=_map_status(detail["status"], detail.get("decision")),
         created_at=detail["created_at"],
         updated_at=detail["updated_at"],
         client_id=str(detail["user_id"]),
-        summary=detail.get("summary") or "Dossier créé",
+        summary=summary,
         customer_explanation=None,
-        agents=_map_agent_outputs(detail.get("agent_outputs", [])),
+        agents=None,
         decision=decision_info,
-        comments=_map_comments(detail.get("comments", [])),
-        auto_decision=detail.get("auto_decision"),
-        auto_decision_confidence=float(detail["auto_decision_confidence"]) if detail.get("auto_decision_confidence") is not None else None,
-        auto_review_required=detail.get("auto_review_required"),
+        comments=[],
+        auto_decision=None,
+        auto_decision_confidence=None,
+        auto_review_required=None,
         loan=_map_loan(detail.get("loan")),
         installments=_map_installments(detail.get("installments", [])),
         payments=_map_payments(detail.get("payments", [])),
@@ -644,20 +681,30 @@ def get_credit_request(req_id: str, user=Depends(get_current_user)):
     detail = fetch_case_detail_for_client(int(req_id), user["user_id"])
     if not detail:
         raise HTTPException(status_code=404, detail="Credit request not found")
+    decision_info = _map_decision(detail.get("decision"))
+    summary = detail.get("summary") or "Votre dossier est en cours d'analyse."
+    if decision_info:
+        summary = (
+            "Votre demande a été accapté."
+            if decision_info.decision == "approve"
+            else "Votre demande a été refusé."
+            if decision_info.decision == "reject"
+            else "Votre demande est en cours de revue."
+        )
     return CreditRequest(
         id=str(detail["case_id"]),
         status=_map_status(detail["status"], detail.get("decision")),
         created_at=detail["created_at"],
         updated_at=detail["updated_at"],
         client_id=str(detail["user_id"]),
-        summary=detail.get("summary") or "Dossier en cours",
+        summary=summary,
         customer_explanation=None,
-        agents=_map_agent_outputs(detail.get("agent_outputs", [])),
-        decision=_map_decision(detail.get("decision")),
-        comments=_map_comments(detail.get("comments", [])),
-        auto_decision=detail.get("auto_decision"),
-        auto_decision_confidence=float(detail["auto_decision_confidence"]) if detail.get("auto_decision_confidence") is not None else None,
-        auto_review_required=detail.get("auto_review_required"),
+        agents=None,
+        decision=decision_info,
+        comments=[],
+        auto_decision=None,
+        auto_decision_confidence=None,
+        auto_review_required=None,
         loan=_map_loan(detail.get("loan")),
         installments=_map_installments(detail.get("installments", [])),
         payments=_map_payments(detail.get("payments", [])),
@@ -716,20 +763,29 @@ async def resubmit_credit_request(
     if not detail:
         raise HTTPException(status_code=500, detail="Failed to resubmit request")
     decision_info = _map_decision(detail.get("decision"))
+    summary = detail.get("summary") or "Votre dossier a été mis à jour et est en cours d'analyse."
+    if decision_info:
+        summary = (
+            "Votre demande a été accapté."
+            if decision_info.decision == "approve"
+            else "Votre demande a été refusé."
+            if decision_info.decision == "reject"
+            else "Votre demande est en cours de revue."
+        )
     return CreditRequest(
         id=str(detail["case_id"]),
         status=_map_status(detail["status"], detail.get("decision")),
         created_at=detail["created_at"],
         updated_at=detail["updated_at"],
         client_id=str(detail["user_id"]),
-        summary=detail.get("summary") or "Dossier mis à jour",
+        summary=summary,
         customer_explanation=None,
-        agents=_map_agent_outputs(detail.get("agent_outputs", [])),
+        agents=None,
         decision=decision_info,
-        comments=_map_comments(detail.get("comments", [])),
-        auto_decision=detail.get("auto_decision"),
-        auto_decision_confidence=float(detail["auto_decision_confidence"]) if detail.get("auto_decision_confidence") is not None else None,
-        auto_review_required=detail.get("auto_review_required"),
+        comments=[],
+        auto_decision=None,
+        auto_decision_confidence=None,
+        auto_review_required=None,
         loan=_map_loan(detail.get("loan")),
         installments=_map_installments(detail.get("installments", [])),
         payments=_map_payments(detail.get("payments", [])),
@@ -745,6 +801,16 @@ def list_client_requests(user=Depends(get_current_user)):
     for detail in records:
         if not detail:
             continue
+        decision_info = _map_decision(detail.get("decision"))
+        summary = detail.get("summary") or "Votre dossier est en cours d'analyse."
+        if decision_info:
+            summary = (
+                "Votre demande a été accapté."
+                if decision_info.decision == "approve"
+                else "Votre demande a été refusé."
+                if decision_info.decision == "reject"
+                else "Votre demande est en cours de revue."
+            )
         results.append(
             CreditRequest(
                 id=str(detail["case_id"]),
@@ -752,14 +818,14 @@ def list_client_requests(user=Depends(get_current_user)):
                 created_at=detail["created_at"],
                 updated_at=detail["updated_at"],
                 client_id=str(detail["user_id"]),
-                summary=detail.get("summary"),
+                summary=summary,
                 customer_explanation=None,
-                agents=_map_agent_outputs(detail.get("agent_outputs", [])),
-                decision=_map_decision(detail.get("decision")),
-                comments=_map_comments(detail.get("comments", [])),
-                auto_decision=detail.get("auto_decision"),
-                auto_decision_confidence=float(detail["auto_decision_confidence"]) if detail.get("auto_decision_confidence") is not None else None,
-                auto_review_required=detail.get("auto_review_required"),
+                agents=None,
+                decision=decision_info,
+                comments=[],
+                auto_decision=None,
+                auto_decision_confidence=None,
+                auto_review_required=None,
                 loan=_map_loan(detail.get("loan")),
                 installments=_map_installments(detail.get("installments", [])),
                 payments=_map_payments(detail.get("payments", [])),

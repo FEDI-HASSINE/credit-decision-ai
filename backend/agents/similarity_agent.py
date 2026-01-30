@@ -1171,6 +1171,7 @@ class SimilarityAgentAI:
                 else:
                     profile_weight = float(request_data.get("profile_weight", 0.6))
                     payment_weight = float(request_data.get("payment_weight", 0.4))
+                    # Weighted merge of profile + payment results by case_id.
                     combined: Dict[Any, Dict[str, Any]] = {}
 
                     def _ingest(points_list: List[Any], weight: float):

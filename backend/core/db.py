@@ -282,6 +282,24 @@ def fetch_user_by_email(email: str) -> Optional[Dict[str, Any]]:
         conn.close()
 
 
+def create_user(email: str, password_hash: str, role: str = "CLIENT") -> Dict[str, Any]:
+    conn = _connect()
+    try:
+        with conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    INSERT INTO users (email, password_hash, role)
+                    VALUES (%s, %s, %s)
+                    RETURNING user_id, email, role
+                    """,
+                    (email, password_hash, role),
+                )
+                return cur.fetchone()
+    finally:
+        conn.close()
+
+
 def fetch_user_by_id(user_id: int) -> Optional[Dict[str, Any]]:
     conn = _connect()
     try:
